@@ -31,6 +31,26 @@ api:
     default-version: ${API_DEFAULT_VERSION:1.0}
     header-name: ${API_VERSION_HEADER:X-API-Version}
 
+# Workspace-membership check against permission-service.
+#
+# The gateway derives tenantId and userId from the token, but NOT workspaceId —
+# a user belongs to several workspaces and picks one per request, so that header
+# is caller-supplied. Filtering on it enforces the rule without verifying the
+# claim; this call verifies it.
+#
+# Currently DISABLED. While false, any authenticated caller can read any
+# workspace inside their own tenant by changing X-Workspace-Id. The service logs
+# a WARNING on every request so that is not silent.
+permission:
+  service:
+    enabled: ${PERMISSION_SERVICE_ENABLED:false}
+    url: ${PERMISSION_SERVICE_URL:http://localhost:8080}
+    validate-path: ${PERMISSION_VALIDATE_PATH:/api/permission/validate-action}
+    # This sits in front of EVERY search, so its worst case is added to every
+    # request's latency. Kept tight deliberately.
+    connect-timeout-ms: ${PERMISSION_CONNECT_TIMEOUT_MS:2000}
+    read-timeout-ms: ${PERMISSION_READ_TIMEOUT_MS:3000}
+
 elasticsearch:
   host: ${ES_HOST_URL:http://localhost:9200}
   # The ALIAS, never a concrete index. See ElasticsearchProperties.

@@ -8,6 +8,7 @@ import com.teamsync.dmssearch.dto.request.SortKey;
 import com.teamsync.dmssearch.dto.response.ApiResponse;
 import com.teamsync.dmssearch.dto.response.SearchPage;
 import com.teamsync.dmssearch.exception.SearchException;
+import com.teamsync.dmssearch.service.PermissionValidationService;
 import com.teamsync.dmssearch.service.SearchService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
@@ -52,6 +53,7 @@ public class SearchController {
 
     private final SearchService searchService;
     private final ElasticsearchProperties props;
+    private final PermissionValidationService permissionValidationService;
 
     @GetMapping(value = "/documents", produces = MediaType.APPLICATION_JSON_VALUE, version = API_VERSION)
     public ResponseEntity<ApiResponse<SearchPage>> searchDocuments(
@@ -87,6 +89,12 @@ public class SearchController {
             @RequestParam Map<String, String> allParams) {
 
         RequestIdentity identity = resolveIdentity(tenantId, workspaceId, userId);
+
+        // Before anything else, and before Elasticsearch is touched. The gateway
+        // does NOT inject X-Workspace-Id — it is caller-supplied — so filtering
+        // on it enforces the rule without ever verifying the claim. This is what
+        // verifies it. No-op while permission.service.enabled is false.
+        permissionValidationService.requireFileRead(identity);
 
         int effectiveSize = validateSize(size);
         validatePaging(page, cursor);
@@ -142,8 +150,11 @@ public class SearchController {
                     "Missing required identity header(s): " + String.join(", ", missing),
                     missing);
         }
-        // userId is audit-only — access is workspace-scoped, so its absence does
-        // not change which documents match.
+        // userId does not change WHICH documents match — access is
+        // workspace-scoped — but it IS the subject of the permission check, so
+        // it stops being merely audit data once permission.service.enabled is
+        // true. Left optional so the disabled path still works; a blank userId
+        // will simply be denied by permission-service when enabled.
         return new RequestIdentity(tenantId.strip(), workspaceId.strip(),
                 isBlank(userId) ? "unknown" : userId.strip());
     }

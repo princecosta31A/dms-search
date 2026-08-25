@@ -54,6 +54,19 @@ public enum SearchErrorCode {
             "Unsupported API Version",
             "The requested API version is not supported by this service."),
 
+    // ---- 403 Forbidden — authenticated, but not allowed here ----
+
+    /**
+     * The caller has no FILE_READ permission in the workspace they asked for.
+     *
+     * <p>403 and not 404: they are authenticated and the endpoint exists — they
+     * simply may not read this workspace. Distinct from 401, which means the
+     * identity headers never arrived.
+     */
+    PERMISSION_DENIED("SRCH-403-001", HttpStatus.FORBIDDEN,
+            "Permission Denied",
+            "You do not have read permission in this workspace."),
+
     // ---- 404 Not Found — the ROUTE does not exist ----
 
     /**
@@ -90,6 +103,19 @@ public enum SearchErrorCode {
     SEARCH_BACKEND_UNAVAILABLE("SRCH-503-001", HttpStatus.SERVICE_UNAVAILABLE,
             "Search Backend Unavailable",
             "The search backend is temporarily unavailable. Please retry."),
+
+    /**
+     * permission-service is unreachable, so workspace membership could not be
+     * verified.
+     *
+     * <p>503 rather than 403 on purpose: the caller may well be authorised — we
+     * simply could not find out. Returning 403 would send them debugging
+     * permissions that are probably fine. This is the fail-closed path: no
+     * answer means no access.
+     */
+    PERMISSION_BACKEND_UNAVAILABLE("SRCH-503-002", HttpStatus.SERVICE_UNAVAILABLE,
+            "Permission Service Unavailable",
+            "Could not verify permissions. Please retry."),
 
     // ---- 500 Internal Server Error — genuinely our fault ----
 

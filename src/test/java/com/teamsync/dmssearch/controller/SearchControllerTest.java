@@ -8,11 +8,13 @@ import com.teamsync.dmssearch.dto.request.SortKey;
 import com.teamsync.dmssearch.dto.response.SearchPage;
 import com.teamsync.dmssearch.exception.GlobalExceptionHandler;
 import com.teamsync.dmssearch.exception.SearchException;
+import com.teamsync.dmssearch.service.PermissionValidationService;
 import com.teamsync.dmssearch.service.SearchService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.accept.DefaultApiVersionStrategy;
@@ -23,6 +25,8 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -45,14 +49,19 @@ class SearchControllerTest {
 
     private MockMvc mockMvc;
     private SearchService searchService;
+    private PermissionValidationService permissionValidationService;
 
     @BeforeEach
     void setUp() {
         searchService = mock(SearchService.class);
+        // Mocked, so the default is "permission granted" — every existing test
+        // exercises the happy path. The denial and outage paths are asserted
+        // explicitly below.
+        permissionValidationService = mock(PermissionValidationService.class);
         ElasticsearchProperties props = new ElasticsearchProperties();
 
         mockMvc = MockMvcBuilders
-                .standaloneSetup(new SearchController(searchService, props))
+                .standaloneSetup(new SearchController(searchService, props, permissionValidationService))
                 .setControllerAdvice(new GlobalExceptionHandler())
                 // Required: the controller declares version = "1.0", and a mapping
                 // with a version cannot resolve without a strategy. Built to mirror
@@ -133,6 +142,73 @@ class SearchControllerTest {
                         .header(RequestIdentity.HEADER_TENANT, "t")
                         .header(RequestIdentity.HEADER_WORKSPACE, "w"))
                 .andExpect(status().isOk());
+    }
+
+    // ------------------------------------------------------------------
+    // workspace permission
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("permission is checked BEFORE Elasticsearch is touched")
+    void permissionCheckedBeforeSearch() throws Exception {
+        mockMvc.perform(withIdentity(get(URL))).andExpect(status().isOk());
+
+        // Order matters: checking after would still return the right status but
+        // would have already run the query, so an unauthorised caller's search
+        // load hits the cluster regardless.
+        InOrder order = inOrder(permissionValidationService, searchService);
+        order.verify(permissionValidationService).requireFileRead(any());
+        order.verify(searchService).search(any(), any());
+    }
+
+    @Test
+    @DisplayName("permission denied -> 403 and the search never runs")
+    void permissionDeniedRejected() throws Exception {
+        doThrow(new SearchException(SearchErrorCode.PERMISSION_DENIED,
+                "User lacks FILE_READ permission in workspace ws-other"))
+                .when(permissionValidationService).requireFileRead(any());
+
+        mockMvc.perform(withIdentity(get(URL)))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value(SearchErrorCode.PERMISSION_DENIED.getCode()));
+
+        // The half that matters: a caller without permission must not reach
+        // Elasticsearch at all.
+        verify(searchService, never()).search(any(), any());
+    }
+
+    @Test
+    @DisplayName("permission-service unreachable -> 503, not 403, and no search")
+    void permissionBackendDownFailsClosed() throws Exception {
+        // Fails CLOSED: no answer means no access. And 503 rather than 403,
+        // because the caller may well be authorised — we could not find out, so
+        // telling them "forbidden" sends them debugging the wrong thing.
+        doThrow(new SearchException(SearchErrorCode.PERMISSION_BACKEND_UNAVAILABLE))
+                .when(permissionValidationService).requireFileRead(any());
+
+        mockMvc.perform(withIdentity(get(URL)))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error")
+                        .value(SearchErrorCode.PERMISSION_BACKEND_UNAVAILABLE.getCode()));
+
+        verify(searchService, never()).search(any(), any());
+    }
+
+    @Test
+    @DisplayName("the workspace checked is the one from the header, not from any parameter")
+    void permissionCheckedAgainstHeaderWorkspace() throws Exception {
+        // A caller must not be able to pass the check for one workspace and then
+        // have the query run against another.
+        mockMvc.perform(get(URL)
+                        .header(RequestIdentity.HEADER_TENANT, "tenant-1")
+                        .header(RequestIdentity.HEADER_WORKSPACE, "workspace-real")
+                        .header(RequestIdentity.HEADER_USER, "user-1")
+                        .param("folderId", "workspace-spoofed"))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<RequestIdentity> captor = ArgumentCaptor.forClass(RequestIdentity.class);
+        verify(permissionValidationService).requireFileRead(captor.capture());
+        assertThat(captor.getValue().workspaceId()).isEqualTo("workspace-real");
     }
 
     // ------------------------------------------------------------------
