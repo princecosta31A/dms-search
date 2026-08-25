@@ -23,14 +23,19 @@
         <lombok.version>1.18.34</lombok.version>
         <springdoc.version>3.0.1</springdoc.version>
         <!--
-            Pinned to the SERVER major version (ES 9.x). The Elasticsearch Java
-            client only guarantees compatibility within its own major; letting the
-            Boot BOM pick an 8.x client against a 9.x cluster works for simple
-            calls via REST compatibility mode and then fails on newer request
-            shapes. Keep this in step with the deployed cluster.
+            8.x ON PURPOSE — the deployed cluster runs Elasticsearch 8.x.
+
+            A 9.x client sends `Content-Type: application/vnd.elasticsearch+json;
+            compatible-with=9`, which an 8.x server rejects outright with
+            media_type_header_exception, so EVERY search fails with a 503. An 8.x
+            client sends compatible-with=8, which 8.x accepts natively and 9.x
+            accepts through REST compatibility mode — so this one version works
+            against both the cluster (8.x) and a local 9.x instance.
+
+            Do not "upgrade" this to match a local Elasticsearch. It tracks the
+            DEPLOYED cluster, and it can only move to 9.x once that does.
         -->
-        <elasticsearch.client.version>9.1.0</elasticsearch.client.version>
-        <logstash-logback.version>7.4</logstash-logback.version>
+        <elasticsearch.client.version>8.17.2</elasticsearch.client.version>
         <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
         <jacoco.version>0.8.11</jacoco.version>
     </properties>
@@ -61,6 +66,17 @@
             <version>${elasticsearch.client.version}</version>
         </dependency>
 
+        <!--
+            Required by the 8.x client's RestClientTransport. The 9.x client
+            bundles its own Rest5Client (Apache HttpClient 5) and needs no extra
+            artifact; the 8.x transport does not, so this is explicit.
+        -->
+        <dependency>
+            <groupId>org.elasticsearch.client</groupId>
+            <artifactId>elasticsearch-rest-client</artifactId>
+            <version>${elasticsearch.client.version}</version>
+        </dependency>
+
         <!-- Lombok -->
         <dependency>
             <groupId>org.projectlombok</groupId>
@@ -87,13 +103,6 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-opentelemetry</artifactId>
-        </dependency>
-
-        <!-- Structured JSON logging -->
-        <dependency>
-            <groupId>net.logstash.logback</groupId>
-            <artifactId>logstash-logback-encoder</artifactId>
-            <version>${logstash-logback.version}</version>
         </dependency>
 
         <!-- Test -->
