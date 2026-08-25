@@ -1,0 +1,466 @@
+openapi: 3.0.3
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  TeamSync dms-search — Search API v1.0                                      ║
+# ║  Hand-curated spec. Keep in step with SearchController.                     ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+info:
+  title: TeamSync Document Search API
+  version: 1.0.0
+  description: |
+    # dms-search
+
+    Read-only search over the Elasticsearch document index. Users never reach
+    Elasticsearch or Kibana directly.
+
+    ---
+
+    ## One endpoint, two jobs
+
+    `GET /api/search/documents` serves **both**:
+
+    | Job | How | Example |
+    |-----|-----|---------|
+    | **Exact identifier lookup** | `term` on a keyword field | `?folderAttr.token_number=TOKEN-20260819054206` |
+    | **Free-text discovery** | `match` on `searchAll`, `operator: and` | `?q=quarterly report` |
+
+    Which query runs depends on **which parameters you send**, not which URL you call.
+
+    ### Do not put identifiers in `q`
+
+    `q` is analysed free text. Hyphens split it into terms, so
+    `q=TOKEN-2345687654` matches a document whose token is
+    `TOKEN-20260819054206` — both contain the term `token`. For an exact value,
+    always use `attr.<key>` or `folderAttr.<key>`.
+
+    ---
+
+    ## Authentication
+
+    This service reads three headers that **gateway-service injects** after
+    validating the caller's token:
+
+    ```
+    X-Tenant-Id      required
+    X-Workspace-Id   required
+    X-User-Id        optional (audit only)
+    ```
+
+    `X-Tenant-Id` and `X-Workspace-Id` are the **authorisation boundary** — they
+    are applied as a mandatory filter on every query and cannot be widened or
+    disabled by any parameter. Requests missing them are rejected with `401`
+    rather than served unscoped.
+
+    ---
+
+    ## Pagination
+
+    Two modes. Pick one; sending both is a `400`.
+
+    | Mode | Params | Use for | Cost |
+    |------|--------|---------|------|
+    | **Offset** | `page`, `size` | page-numbered UI | O(page × size) per shard |
+    | **Cursor** | `cursor` | infinite scroll, export | constant at any depth |
+
+    **Offset has a hard ceiling.** `page × size + size` must not exceed
+    **10,000** (the index's `max_result_window`); beyond that you get
+    `SRCH-400-001`. This is not arbitrary — with 4 shards, `from=9980` makes
+    every shard return 10,000 hits to the coordinating node so it can sort
+    40,000 and discard 39,980. Use the cursor to page deeper.
+
+    **Cursors are opaque.** Echo `nextCursor` back unmodified. Do not parse or
+    construct one; the encoding is an implementation detail.
+
+    ### `total` is a lower bound past 10,000
+
+    Elasticsearch stops counting there. `totalIsExact: false` means "at least
+    this many" — display it as `10,000+`.
+
+    ---
+
+    ## Result shape
+
+    A result is a **summary**, not the full document — enough to render a list
+    without a second round trip. `content` (full OCR text), `path` and `bucket`
+    are excluded. For the complete document, call document-service with the
+    `documentId`.
+
+    ---
+
+    ## Versioning
+
+    **Header-based**, matching document-service. The path carries no version
+    segment:
+
+    ```
+    X-API-Version: 1.0
+    ```
+
+    | Version | Status | Sunset |
+    |---------|--------|--------|
+    | **1.0** | **Current** | — |
+
+    Omitting the header resolves to the default version (`1.0`) rather than
+    failing, so exploration with curl or a browser stays frictionless. Clients
+    that want to pin should send it explicitly — a future `1.1` will then not
+    change their behaviour silently.
+
+servers:
+  - url: http://localhost:7008
+    description: Local
+  - url: https://{gateway}/dms-search
+    description: Through the gateway
+    variables:
+      gateway:
+        default: gateway.internal
+
+tags:
+  - name: Search
+    description: Document search
+  - name: Health
+    description: Liveness and readiness
+
+paths:
+
+  /api/search/documents:
+    get:
+      tags: [Search]
+      summary: Search documents
+      operationId: searchDocuments
+      description: |
+        Returns documents in the caller's tenant and workspace matching the
+        supplied criteria.
+
+        Trashed and archived documents are hidden unless explicitly requested.
+
+        **No matches returns `200` with an empty `items` array — never `404`.**
+      parameters:
+        # ---- version ----
+        - name: X-API-Version
+          in: header
+          required: false
+          description: |
+            API version. Defaults to `1.0` when omitted; send it explicitly to pin.
+          schema:
+            type: string
+            enum: ["1.0"]
+            default: "1.0"
+
+        # ---- identity ----
+        - name: X-Tenant-Id
+          in: header
+          required: true
+          description: Injected by the gateway. Part of the authorisation boundary.
+          schema: { type: string }
+          example: 6a7421efcd701b1894187f6c
+        - name: X-Workspace-Id
+          in: header
+          required: true
+          description: Injected by the gateway. Part of the authorisation boundary.
+          schema: { type: string }
+          example: 6a7423027caca4707eed8321
+        - name: X-User-Id
+          in: header
+          required: false
+          description: Audit only. Does not affect which documents match.
+          schema: { type: string }
+
+        # ---- free text ----
+        - name: q
+          in: query
+          required: false
+          description: |
+            Free text, matched against `searchAll` (filename, folder name and
+            folder attributes) with `operator: and` — every term must match.
+
+            Not for identifiers; see the description above.
+          schema: { type: string }
+          example: quarterly report
+
+        # ---- exact filters ----
+        - name: documentTypeName
+          in: query
+          schema: { type: string }
+          example: passport
+        - name: documentTypeId
+          in: query
+          schema: { type: string }
+        - name: folderId
+          in: query
+          schema: { type: string }
+        - name: folderTypeId
+          in: query
+          schema: { type: string }
+        - name: folderTypeName
+          in: query
+          schema: { type: string }
+        - name: folderLifecycleState
+          in: query
+          schema: { type: string }
+          example: ACTIVE
+        - name: fileExt
+          in: query
+          description: Includes the dot, as stored.
+          schema: { type: string }
+          example: .pdf
+        - name: validationStatus
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, SUCCESS, FAILED, NOT_APPLICABLE]
+
+        # ---- dynamic attribute filters ----
+        - name: attr.{key}
+          in: query
+          required: false
+          description: |
+            Exact match on a document attribute. `{key}` is any attribute name,
+            e.g. `attr.pan_number=ABCDE1234F`.
+
+            This is a `term` query on the keyword field — exact, no analysis, no
+            false positives.
+          schema: { type: string }
+        - name: folderAttr.{key}
+          in: query
+          required: false
+          description: |
+            Exact match on a folder attribute, e.g.
+            `folderAttr.token_number=TOKEN-20260819054206`.
+          schema: { type: string }
+
+        # ---- ranges ----
+        - name: createdFrom
+          in: query
+          description: Inclusive lower bound, ISO-8601.
+          schema: { type: string }
+          example: "2026-01-01"
+        - name: createdTo
+          in: query
+          description: Inclusive upper bound, ISO-8601.
+          schema: { type: string }
+        - name: updatedFrom
+          in: query
+          schema: { type: string }
+        - name: updatedTo
+          in: query
+          schema: { type: string }
+
+        # ---- visibility ----
+        - name: includeDeleted
+          in: query
+          description: Include trashed documents (a Trash view).
+          schema: { type: boolean, default: false }
+        - name: includeArchived
+          in: query
+          schema: { type: boolean, default: false }
+
+        # ---- paging ----
+        - name: page
+          in: query
+          description: Zero-based. Mutually exclusive with `cursor`.
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          description: |
+            Opaque cursor from a previous response's `nextCursor`. Echo it back
+            unmodified. Mutually exclusive with `page`.
+          schema: { type: string }
+        - name: sort
+          in: query
+          description: |
+            `relevance` needs a `q` — without one every document scores the same,
+            so the service falls back to `createdAt`.
+
+            Every sort is tie-broken by `documentId`, which is what makes cursor
+            paging stable.
+          schema:
+            type: string
+            enum: [relevance, createdAt, updatedAt, fileName]
+
+      responses:
+        "200":
+          description: Search completed. May contain zero results.
+          headers:
+            Cache-Control:
+              description: Always `private, no-store` — results are caller-scoped.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "400":
+          description: |
+            Invalid request. `SRCH-400-001` pagination limit, `-002` bad cursor,
+            `-003` invalid parameter, `-004` page and cursor together,
+            `-005` unsupported sort.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Identity headers absent — the request did not come through the gateway.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: Elasticsearch unreachable. Retryable; see `Retry-After`.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness and readiness
+      operationId: health
+      description: |
+        Performs a real round trip to Elasticsearch and verifies the configured
+        alias resolves. `503` when either fails.
+      responses:
+        "200":
+          description: Healthy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+        "503":
+          description: Degraded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+
+components:
+  schemas:
+
+    SearchResponse:
+      type: object
+      properties:
+        status: { type: integer, example: 200 }
+        message: { type: string, example: Search completed successfully }
+        data: { $ref: "#/components/schemas/SearchPage" }
+        requestInfo: { $ref: "#/components/schemas/ResponseMetadata" }
+
+    SearchPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/DocumentSummary" }
+        page:
+          type: integer
+          nullable: true
+          description: Zero-based. Null when paging by cursor.
+        size: { type: integer, example: 20 }
+        total:
+          type: integer
+          format: int64
+          description: A lower bound once it reaches 10,000 — see `totalIsExact`.
+        totalIsExact:
+          type: boolean
+          description: False means "at least `total`"; display as `10,000+`.
+        hasNext: { type: boolean }
+        nextCursor:
+          type: string
+          nullable: true
+          description: Opaque. Echo back unmodified. Present only when `hasNext`.
+        tookMs:
+          type: integer
+          format: int64
+          description: Elasticsearch's own query time, excluding network.
+
+    DocumentSummary:
+      type: object
+      description: |
+        A search result. Not the full document — `content`, `path` and `bucket`
+        are excluded. Fetch the full document from document-service by `documentId`.
+      properties:
+        documentId: { type: string }
+        tenantId: { type: string }
+        workspaceId: { type: string }
+        userId: { type: string }
+        fileName: { type: string, example: Quarterly Report 001.pdf }
+        fileExt: { type: string, example: .pdf }
+        fileSize: { type: integer, format: int64, nullable: true }
+        documentTypeId: { type: string, nullable: true }
+        documentTypeName: { type: string }
+        folderId: { type: string }
+        folderName: { type: string }
+        folderTypeId: { type: string }
+        folderTypeName: { type: string }
+        folderLifecycleState: { type: string }
+        isDeleted: { type: boolean }
+        isArchived: { type: boolean }
+        createdAt:
+          type: string
+          description: ISO-8601 with offset, as stored.
+          example: "2026-08-24T17:01:54.882074+05:30"
+        updatedAt: { type: string }
+        validationStatus:
+          type: string
+          enum: [PENDING, SUCCESS, FAILED, NOT_APPLICABLE]
+        validationPassed: { type: boolean, nullable: true }
+        validationType: { type: string, nullable: true }
+        validationLabel: { type: string, nullable: true }
+        validationConfidence: { type: number, format: float, nullable: true }
+        attr:
+          type: object
+          additionalProperties: true
+          description: Document attributes.
+        folderAttr:
+          type: object
+          additionalProperties: true
+          description: Folder attributes.
+        score:
+          type: number
+          nullable: true
+          description: Relevance. Null when the query had no free-text term.
+
+    ErrorResponse:
+      type: object
+      properties:
+        status: { type: integer, example: 400 }
+        message: { type: string, example: Invalid Parameter }
+        error:
+          type: string
+          description: Stable machine-readable code. Branch on this, not on `message`.
+          example: SRCH-400-003
+        details: { $ref: "#/components/schemas/ErrorDetails" }
+        requestInfo: { $ref: "#/components/schemas/ResponseMetadata" }
+
+    ErrorDetails:
+      type: object
+      properties:
+        reason: { type: string }
+        fields:
+          type: array
+          items: { type: string }
+          description: |
+            Parameter NAMES at fault. Values are never echoed — search terms are
+            treated as PII.
+          example: [size]
+        retryAfterSeconds: { type: integer, nullable: true }
+
+    ResponseMetadata:
+      type: object
+      properties:
+        timestamp: { type: string, format: date-time }
+        traceId:
+          type: string
+          description: OpenTelemetry trace id. Quote this in a bug report.
+        correlationId: { type: string }
+
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        checks:
+          type: object
+          additionalProperties: { type: string }
+          example:
+            elasticsearch: ok
+            index_alias: ok

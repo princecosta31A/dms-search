@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Structured JSON logging.
+
+  Every line carries traceId/spanId, so one trace id from a response's
+  requestInfo pulls up the whole request across services.
+
+  PII: search terms routinely contain PAN numbers, passport numbers and names.
+  Nothing here should ever log a raw query string or document content — see
+  SearchAuditLogger, which logs the SHAPE of a query (which filters were used,
+  how many hits, how long) and never its values.
+-->
+<configuration>
+
+    <springProperty scope="context" name="appName" source="spring.application.name" defaultValue="dms-search"/>
+
+    <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
+            <providers>
+                <timestamp>
+                    <fieldName>timestamp</fieldName>
+                    <timeZone>UTC</timeZone>
+                </timestamp>
+                <pattern>
+                    <pattern>
+                        {
+                          "service": "${appName}",
+                          "level": "%level",
+                          "logger": "%logger{40}",
+                          "thread": "%thread",
+                          "traceId": "%mdc{trace_id:-}",
+                          "spanId": "%mdc{span_id:-}"
+                        }
+                    </pattern>
+                </pattern>
+                <message>
+                    <fieldName>message</fieldName>
+                </message>
+                <!-- Structured key/value pairs passed via SLF4J's fluent API
+                     land as real JSON fields rather than being interpolated
+                     into the message string. -->
+                <keyValuePairs/>
+                <stackTrace>
+                    <fieldName>stackTrace</fieldName>
+                    <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                        <maxDepthPerThrowable>25</maxDepthPerThrowable>
+                        <rootCauseFirst>true</rootCauseFirst>
+                    </throwableConverter>
+                </stackTrace>
+            </providers>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="JSON"/>
+    </root>
+
+</configuration>
