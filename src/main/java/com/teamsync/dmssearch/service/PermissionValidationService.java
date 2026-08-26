@@ -11,6 +11,7 @@ import com.teamsync.dmssearch.exception.SearchException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
 
 /**
  * Verifies the caller may read in the workspace they claim.
@@ -40,10 +41,17 @@ public class PermissionValidationService {
     /**
      * Throws unless the caller has {@code FILE_READ} in the workspace.
      *
-     * <p><b>Fails closed.</b> If permission-service is unreachable the request is
-     * rejected with 503, never allowed through. An authorisation check that
-     * defaults to "yes" when the authoriser is down is not a check — and the
-     * failure would be invisible, since every search would keep succeeding.
+     * <p><b>Fails closed</b>, but distinguishes two very different failures:
+     * <ul>
+     *   <li><b>Answered "no"</b> — {@code data: false}, or a 4xx such as
+     *       {@code 404 "User role not found"} → <b>403</b>. Final; retrying
+     *       cannot change it.</li>
+     *   <li><b>No answer</b> — connection refused, timeout, 5xx → <b>503</b>.
+     *       The caller may be authorised; we could not find out.</li>
+     * </ul>
+     * Collapsing these into one status (as this once did, reporting 503 for a
+     * 404 denial) tells clients to retry a settled decision and sends them
+     * chasing an outage that is not happening.
      */
     public void requireFileRead(RequestIdentity identity) {
         if (!props.isEnabled()) {
@@ -62,11 +70,31 @@ public class PermissionValidationService {
         PermissionResponse<Boolean> response;
         try {
             response = permissionClient.validateAction(request);
+
+        } catch (HttpClientErrorException e) {
+            // A 4xx is permission-service ANSWERING, not failing. The common case
+            // is 404 "User role not found" — the user has no role in this
+            // workspace, which is a denial and will never change on retry.
+            //
+            // Reporting 503 here (as this once did) is wrong twice over: it tells
+            // the caller to retry a decision that is already final, and it points
+            // them at an outage that is not happening. Same distinction
+            // document-service draws in PermissionClientFallback — business error
+            // vs infrastructure failure.
+            log.warn("[Permission] DENIED by permission-service — userId={} tenantId={} "
+                            + "workspaceId={} action=FILE_READ status={}",
+                    identity.userId(), identity.tenantId(), identity.workspaceId(),
+                    e.getStatusCode().value());
+            throw new SearchException(
+                    SearchErrorCode.PERMISSION_DENIED,
+                    "User lacks FILE_READ permission in workspace " + identity.workspaceId(),
+                    null, e);
+
         } catch (Exception e) {
-            // Unreachable/timeout — 503, not 403. The caller may well be
-            // authorised; we simply cannot tell, and saying "forbidden" would
-            // send them off debugging their own permissions.
-            log.error("[Permission] validate-action failed — userId={} workspaceId={} type={} msg={}",
+            // No answer at all — connection refused, timeout, 5xx. 503, not 403:
+            // the caller may well be authorised, we simply could not find out, and
+            // saying "forbidden" would send them debugging permissions that are fine.
+            log.error("[Permission] validate-action unreachable — userId={} workspaceId={} type={} msg={}",
                     identity.userId(), identity.workspaceId(),
                     e.getClass().getSimpleName(), e.getMessage());
             throw new SearchException(
