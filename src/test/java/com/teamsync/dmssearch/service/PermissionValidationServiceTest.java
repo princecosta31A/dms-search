@@ -15,6 +15,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.ResourceAccessException;
 
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.json.JsonMapper;
+
 import java.net.SocketTimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -200,5 +203,29 @@ class PermissionValidationServiceTest {
         // reads like a missing role rather than an unrecognised action. Same
         // wire value document-service sends.
         assertThat(sent.getAction()).isEqualTo("file.read");
+    }
+
+    // ------------------------------------------------------------------
+    // envelope shape
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("parses permission-service's real envelope — which has no 'success' field")
+    void parsesRealEnvelope() {
+        // Verbatim output of permission-service's ApiResponseBuilder. This DTO once
+        // declared `boolean success` and `String code` — neither field exists. Under
+        // Jackson 3 that was fatal, not merely unused: the all-args constructor is
+        // auto-detected as a creator, and a primitive argument with nothing to bind
+        // to aborts the parse, so every ALLOWED search came back 503.
+        String body = """
+                {"httpStatus":200,"message":"Access Allowed","data":true,\
+                "path":"/validate-action","timestamp":"2026-08-26T16:30:00+05:30"}""";
+
+        PermissionResponse<Boolean> parsed = JsonMapper.builder().build()
+                .readValue(body, new TypeReference<PermissionResponse<Boolean>>() {});
+
+        assertThat(parsed.getData()).isTrue();
+        assertThat(parsed.getHttpStatus()).isEqualTo(200);
+        assertThat(parsed.getMessage()).isEqualTo("Access Allowed");
     }
 }
