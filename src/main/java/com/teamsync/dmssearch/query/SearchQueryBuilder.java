@@ -97,8 +97,10 @@ public class SearchQueryBuilder {
         // NOT routed through searchAll. `match` defaults to OR and the analyzer
         // splits on hyphens, so "TOKEN-2345687654" would match a document whose
         // token is "TOKEN-20260819054206" purely because both contain "token".
-        addAttributeTerms(bool, "attr", criteria.getAttributes());
-        addAttributeTerms(bool, "folderAttr", criteria.getFolderAttributes());
+        // attr is flattened -> stored verbatim, needs the case-insensitive flag.
+        // folderAttr is normalized at index time -> plain term is correct and faster.
+        addAttributeTerms(bool, "attr",       criteria.getAttributes(),       true);
+        addAttributeTerms(bool, "folderAttr", criteria.getFolderAttributes(), false);
 
         // ── date ranges ──
         addDateRange(bool, "createdAt", criteria.getCreatedFrom(), criteria.getCreatedTo());
@@ -179,13 +181,28 @@ public class SearchQueryBuilder {
         }
     }
 
-    private void addAttributeTerms(BoolQuery.Builder bool, String prefix, Map<String, String> values) {
+    /**
+     * @param caseInsensitive ask Elasticsearch to ignore case when matching.
+     *        Required for {@code attr}, which is a {@code flattened} field: flattened
+     *        does not accept a {@code normalizer} at all — ES rejects the mapping with
+     *        {@code unknown parameter [normalizer] on mapper of type [flattened]} — so
+     *        values are stored exactly as ingested (uppercase, e.g. {@code 49AA}) and a
+     *        plain term query for {@code 49aa} silently returns zero hits.
+     *        <p>Not needed for {@code folderAttr}: it is a normal object whose dynamic
+     *        templates apply {@code lowercase_normalizer}, so the terms are already
+     *        folded at index time and a plain term query is both correct and faster.
+     */
+    private void addAttributeTerms(BoolQuery.Builder bool, String prefix,
+                                   Map<String, String> values, boolean caseInsensitive) {
         if (values == null || values.isEmpty()) {
             return;
         }
         values.forEach((key, value) -> {
             if (key != null && !key.isBlank() && value != null && !value.isBlank()) {
-                bool.filter(termQuery(prefix + "." + key.strip(), value.strip()));
+                String field = prefix + "." + key.strip();
+                bool.filter(caseInsensitive
+                        ? termQueryIgnoringCase(field, value.strip())
+                        : termQuery(field, value.strip()));
             }
         });
     }
@@ -210,6 +227,11 @@ public class SearchQueryBuilder {
 
     private Query termQuery(String field, String value) {
         return Query.of(q -> q.term(t -> t.field(field).value(value)));
+    }
+
+    /** Term query that matches regardless of case — see {@link #addAttributeTerms}. */
+    private Query termQueryIgnoringCase(String field, String value) {
+        return Query.of(q -> q.term(t -> t.field(field).value(value).caseInsensitive(true)));
     }
 
     private Query boolTermQuery(String field, boolean value) {

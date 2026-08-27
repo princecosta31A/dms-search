@@ -186,6 +186,38 @@ class SearchQueryBuilderTest {
         }
 
         @Test
+        @DisplayName("attr lookups ignore case — flattened cannot be normalized at index time")
+        void attrTermsAreCaseInsensitive() {
+            // `attr` is a flattened field, and flattened rejects a `normalizer`
+            // outright ("unknown parameter [normalizer] on mapper of type
+            // [flattened]"). Values are therefore stored exactly as ingested —
+            // uppercase, e.g. "49AA" — so without this flag a caller searching
+            // "49aa" gets zero hits and no error, which is indistinguishable from
+            // "no such documents".
+            String body = json(builder.build(
+                    base().attributes(Map.of("formType", "49aa")).build(),
+                    IDENTITY, 0, null));
+
+            assertThat(body).contains("attr.formType");
+            assertThat(body).contains("case_insensitive");
+        }
+
+        @Test
+        @DisplayName("folderAttr lookups do NOT set case_insensitive — the normalizer already folded them")
+        void folderAttrTermsStayCaseSensitiveInQuery() {
+            // folderAttr is a normal object whose dynamic templates apply
+            // lowercase_normalizer, so its terms are already folded at index time.
+            // A plain term query is both correct and cheaper; the flag would cost
+            // an automaton match for nothing.
+            String body = json(builder.build(
+                    base().folderAttributes(Map.of("pan_number", "AKTPT4471C")).build(),
+                    IDENTITY, 0, null));
+
+            assertThat(body).contains("folderAttr.pan_number");
+            assertThat(body).doesNotContain("case_insensitive");
+        }
+
+        @Test
         @DisplayName("blank filter values are ignored rather than matching empty string")
         void blankFiltersAreDropped() {
             String body = json(builder.build(
