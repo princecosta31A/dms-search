@@ -1,6 +1,7 @@
 package com.teamsync.dmssearch.service;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
@@ -48,8 +49,14 @@ public class SearchService {
         if (byCursor) {
             searchAfter = cursorCodec.decode(criteria.getCursor());
         } else {
-            from = criteria.getPage() * criteria.getSize();
-            guardOffsetWindow(from, criteria.getSize());
+            // long, not int. page and size are both ints, so page * size silently
+            // overflows: page=25,000,000 x size=100 is 2.5 billion, which wraps to
+            // -1,794,967,296. A negative offset sails through guardOffsetWindow
+            // (it only checks the upper bound) and reaches Elasticsearch, which
+            // rejects it — turning a caller's typo into a backend error.
+            long offset = (long) criteria.getPage() * criteria.getSize();
+            guardOffsetWindow(offset, criteria.getSize());
+            from = (int) offset;   // safe: the guard proved it fits the window
         }
 
         SearchRequest request = queryBuilder.build(criteria, identity, from, searchAfter);
@@ -58,9 +65,39 @@ public class SearchService {
         SearchResponse<DocumentSummary> response;
         try {
             response = es.search(request, DocumentSummary.class);
+        } catch (ElasticsearchException e) {
+            // Elasticsearch ANSWERED — with a status. A 4xx means it read our
+            // request and refused it, so the query we built was malformed: an
+            // unparseable date, a negative offset, a cursor that does not match
+            // the sort. Retrying cannot change that answer, and reporting 503
+            // would tell every retry policy in the fleet to send it again.
+            //
+            // Only the error TYPE is surfaced, never e.getMessage(): Elasticsearch
+            // echoes the offending query back in its reason, and that query can
+            // carry a caller's search terms.
+            auditLogger.logFailure(criteria, identity, e);
+
+            int status = e.status();
+            if (status >= 400 && status < 500) {
+                String type = (e.error() != null && e.error().type() != null)
+                        ? e.error().type() : "unknown";
+                log.warn("[Search] Elasticsearch rejected the query — status={} type={}", status, type);
+                throw new SearchException(
+                        SearchErrorCode.BACKEND_REJECTED_QUERY,
+                        SearchErrorCode.BACKEND_REJECTED_QUERY.getDefaultMessage() + " (" + type + ")",
+                        null, e);
+            }
+
+            // 5xx from Elasticsearch: it is genuinely struggling, retry is right.
+            log.error("[Search] Elasticsearch error — status={}", status);
+            throw new SearchException(
+                    SearchErrorCode.SEARCH_BACKEND_UNAVAILABLE,
+                    SearchErrorCode.SEARCH_BACKEND_UNAVAILABLE.getDefaultMessage(),
+                    null, e);
+
         } catch (Exception e) {
-            // 503, not 500: the request was fine and is worth retrying. Returning
-            // 500 would tell clients (and their retry policies) the opposite.
+            // No answer at all — IOException, connection refused, socket timeout.
+            // 503, not 500: the request itself was fine and is worth retrying.
             auditLogger.logFailure(criteria, identity, e);
             throw new SearchException(
                     SearchErrorCode.SEARCH_BACKEND_UNAVAILABLE,
@@ -85,9 +122,13 @@ public class SearchService {
      * shard return 10,000 hits to the coordinating node so it can sort 40,000 and
      * discard 39,980. That cost is why deep paging needs {@code search_after}.
      */
-    private void guardOffsetWindow(int from, int size) {
-        long window = (long) from + size;
-        if (window > props.getMaxResultWindow()) {
+    private void guardOffsetWindow(long from, int size) {
+        // Rejects a negative offset too. It cannot arrive from a valid request —
+        // page and size are validated non-negative — but it is exactly what an
+        // overflow upstream would produce, and a guard that only checks the upper
+        // bound would wave it through to Elasticsearch.
+        long window = from + size;
+        if (from < 0 || window > props.getMaxResultWindow()) {
             throw new SearchException(
                     SearchErrorCode.PAGINATION_LIMIT_EXCEEDED,
                     "page * size + size must not exceed " + props.getMaxResultWindow()
@@ -116,11 +157,28 @@ public class SearchService {
             items.add(doc);
         }
 
+        // Elasticsearch's timeout is best-effort: it does not abort the search, it
+        // returns whatever the shards reported so far and raises this flag. Ignoring
+        // it means a search that covered a quarter of the data is served as the whole
+        // answer — HTTP 200, documents on screen, a total that is simply wrong.
+        boolean complete = !Boolean.TRUE.equals(response.timedOut());
+
         long total = 0;
         boolean exact = true;
         if (response.hits().total() != null) {
             total = response.hits().total().value();
             exact = response.hits().total().relation() == TotalHitsRelation.Eq;
+        }
+
+        // A search that did not finish cannot have produced an exact count. Without
+        // this, a truncated search reports "800 results, exact" — a confident lie,
+        // and the one case a caller has no way to detect.
+        if (!complete) {
+            exact = false;
+            log.warn("[Search] Elasticsearch timed out — partial results returned. "
+                    + "hits={} reportedTotal={} tookMs={}. Repeated occurrences mean the "
+                    + "query is too broad or the cluster is under-provisioned.",
+                    hits.size(), total, response.took());
         }
 
         // A full page implies there may be more. Elasticsearch does not report
@@ -142,6 +200,7 @@ public class SearchService {
                 .size(criteria.getSize())
                 .total(total)
                 .totalIsExact(exact)
+                .complete(complete)
                 .hasNext(hasNext)
                 .nextCursor(nextCursor)
                 .tookMs(response.took())

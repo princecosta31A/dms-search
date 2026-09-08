@@ -4,11 +4,10 @@ import com.teamsync.dmssearch.versioning.ApiVersioningProperties;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.ApiVersionConfigurer;
-import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /**
- * Web configuration — API versioning and static OpenAPI hosting.
+ * Web configuration — API versioning.
  *
  * <h2>Versioning</h2>
  * Header-based, using Spring Framework 7's native API versioning, matching
@@ -45,11 +44,4 @@ public class WebConfig implements WebMvcConfigurer {
                 .setDefaultVersion(versioning.defaultVersion());
     }
 
-    @Override
-    public void addResourceHandlers(ResourceHandlerRegistry registry) {
-        // Serves the hand-curated spec at /openapi/search-api-v1.0.yaml
-        registry.addResourceHandler("/openapi/**")
-                .addResourceLocations("classpath:/static/openapi/")
-                .setCachePeriod(3600);
-    }
 }

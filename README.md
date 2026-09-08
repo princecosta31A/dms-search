@@ -53,24 +53,54 @@ which are `term` queries and cannot false-positive.
 Three headers, injected by **gateway-service** after it validates the caller's token:
 
 ```
-X-Tenant-Id      required   ─┐ the authorisation boundary
-X-Workspace-Id   required   ─┘
-X-User-Id        optional   audit only
+X-Tenant-Id      required   from the token — cannot be forged
+X-Workspace-Id   required   CALLER-SUPPLIED — this is the one to worry about
+X-User-Id        required   subject of the permission check
 ```
 
-Access is **workspace-scoped**: a user with a role in a workspace may see every
-document in it. So authorisation is exactly two `term` filters on fields already
-indexed — no permission-service call, no ACL field, nothing to keep in sync.
+All three are required; a missing one is `401 SRCH-401-001`, and the response
+names which. `X-User-Id` was optional while it was audit-only, defaulting to the
+literal `"unknown"`. That became wrong once it was the permission subject:
+permission-service answers `404` for that subject, which maps to `403`, so a
+**missing header** was reported to the caller as *"you do not have read
+permission in this workspace"* — sending whoever investigated to audit role
+assignments for a problem that did not exist. It also left `userId=unknown` in
+the audit log: a compliance record of a search with no subject.
 
-Those two filters are added in `SearchQueryBuilder` **before** anything the
-caller sent, in `filter` context, on every single query. There is no flag,
+Access is **workspace-scoped**: a user with a role in a workspace may see every
+document in it. Enforcing that takes **two independent mechanisms**, and it is
+worth being precise about which does what.
+
+**1. Two `term` filters — enforce the boundary.**
+`tenantId` and `workspaceId` are added in `SearchQueryBuilder` **before** anything
+the caller sent, in `filter` context, on every single query. There is no flag,
 parameter or "admin" path that omits them, and `SearchQueryBuilderTest`'s
 `SecurityBoundary` tests assert that across every permutation.
 
-> ⚠️ **This trusts the gateway.** The headers only mean anything if the service
-> is unreachable except through it. If port 7008 is directly reachable, any
-> caller can set `X-Tenant-Id` and read another tenant's documents. Enforce it
-> with a NetworkPolicy or mesh mTLS — not by convention.
+**2. A permission-service call — verifies the claim.**
+The filters are not sufficient on their own. The gateway derives `tenantId` and
+`userId` from the token, but **not** `workspaceId` — a user belongs to several
+workspaces and picks one per request, so that header is caller-supplied.
+Filtering on it means "only show this workspace"; it never asks "may you see this
+workspace?". Without the second mechanism, any authenticated caller reads any
+workspace in their own tenant by changing one header.
+
+`PermissionValidationService` closes that gap, checking `file.read` against
+permission-service before every search. It fails closed: a denial is `403`, and
+an unreachable permission-service is `503` — never an allow.
+
+> ⚠️ **The permission check is OFF by default.** `PERMISSION_SERVICE_ENABLED`
+> defaults to `false`, because permission-service is not reachable from a
+> developer laptop. **While it is false, mechanism 2 does not run** and the
+> workspace boundary is unverified — exactly the hole described above. The
+> service logs a WARNING on every request so this is not silent, but it must be
+> `true` in any deployed environment.
+
+> ⚠️ **All of this trusts the gateway.** The headers only mean anything if the
+> service is unreachable except through it. If port 7008 is directly reachable,
+> any caller can set `X-Tenant-Id` and read another tenant's documents — and no
+> permission check helps, because `tenantId` would be forged too. Enforce it with
+> a NetworkPolicy or mesh mTLS, not by convention.
 
 ## Pagination
 
@@ -93,6 +123,29 @@ scores order arbitrarily and paging repeats some documents while skipping others
 `total` stops counting at 10,000; `totalIsExact: false` means "at least this
 many". Counting further (`track_total_hits: true`) costs a full match scan on
 every query.
+
+### `complete` vs `totalIsExact`
+
+Two flags answering different questions. Both are needed.
+
+| `complete` | `totalIsExact` | What happened | Show the user |
+|---|---|---|---|
+| `true` | `true` | finished, counted exactly | `800 results · 40 pages` |
+| `true` | `false` | **finished fine** — ES stopped counting at 10,000 | `10,000+ results` |
+| `false` | `false` | ran out of time — results AND count unreliable | `incomplete — narrow your search` |
+| `false` | `true` | impossible — forced `false` in `toPage()` | — |
+
+`complete: false` means Elasticsearch hit the server-side timeout. It does **not**
+abort on timeout — it returns whatever the shards had reported and raises
+`timed_out`, so a truncated search is otherwise indistinguishable from a whole
+one: HTTP 200, documents on screen, a total. Measured on a 10-crore index, the
+same query returned `99,981,150` complete and `24,877,353` truncated.
+
+A search that did not finish cannot have counted exactly, so `totalIsExact` is
+forced `false` whenever `complete` is `false` — otherwise a truncated search
+reports "800 results, exact", which is the one case a caller cannot detect.
+
+Row 2 is a healthy broad search, not a failure. Only row 3 is a problem.
 
 ## Response shape
 
@@ -120,11 +173,28 @@ clients to handle two error shapes.
 | `SRCH-400-003` | 400 | Invalid parameter |
 | `SRCH-400-004` | 400 | `page` and `cursor` together |
 | `SRCH-400-005` | 400 | Unsupported sort |
+| `SRCH-400-006` | 400 | Unsupported `X-API-Version` |
+| `SRCH-400-007` | 400 | Elasticsearch rejected the query (bad date, bad offset, mismatched cursor) |
 | `SRCH-401-001` | 401 | Identity headers absent |
+| `SRCH-403-001` | 403 | No `file.read` permission in that workspace |
+| `SRCH-404-001` | 404 | Route does not exist |
+| `SRCH-500-001` | 500 | Unhandled fault — a bug, not an operational state |
 | `SRCH-503-001` | 503 | Elasticsearch unreachable (retryable, sends `Retry-After`) |
+| `SRCH-503-002` | 503 | permission-service unreachable — fails closed, never allows |
+
+This table is the contract; `SearchErrorCode.java` is the source of truth.
+**Adding a code there means adding a row here** — the previous version of this
+table listed 7 of 13, and the OpenAPI spec listed 2, which is why that spec no
+longer exists.
 
 **No matches is `200` with an empty array, never `404`** — an empty result set is
 a successful search.
+
+**`400` vs `503` is the distinction that matters.** Elasticsearch answering *"your
+query is malformed"* is an answer, not an outage: `SRCH-400-007`, and clients
+must not retry. Elasticsearch not answering at all is `SRCH-503-001`, retryable,
+with `Retry-After`. Collapsing the two — as a single `catch (Exception)` does —
+tells every retry policy in the fleet to re-send a request that can never succeed.
 
 **503, not 500**, when Elasticsearch is down: the request was fine and is worth
 retrying, and a 500 tells clients' retry policies the opposite.
@@ -178,7 +248,7 @@ curl -H "X-Tenant-Id: t1" -H "X-Workspace-Id: w1" \
 ## Tests
 
 ```bash
-mvn test      # 46 tests
+mvn test      # 80 tests
 ```
 
 `SearchQueryBuilderTest.SecurityBoundary` is the one that matters: it asserts the
@@ -188,12 +258,27 @@ parameter. A regression there is a cross-tenant data leak, not a wrong result.
 
 ## API spec
 
-Hand-curated at `src/main/resources/static/openapi/search-api-v1.0.yaml`
-(OpenAPI 3.0.3), matching document-service's spec-first approach.
+Generated from the code by `springdoc`:
 
-`springdoc` is on the classpath for swagger-ui and for **drift detection** —
-generate the spec from the running app in CI and diff it against the curated
-file. That recovers the one thing spec-first loses.
+```
+/v3/api-docs          the spec, JSON
+/swagger-ui.html      the UI
+```
+
+There was a hand-curated `search-api-v1.0.yaml` here, written spec-first like
+document-service. It has been removed. Nothing generated a client from it, and
+within two weeks it had drifted badly enough to be actively misleading: it
+documented 2 of the 13 error codes, and omitted `complete` — the field that
+tells a caller their results are partial. A client generated from it would have
+silently dropped the one flag that says "this answer is incomplete".
+
+The drift-detection step meant to prevent that (generate in CI, diff against the
+curated file) was described in this README and never wired up. A stale spec is
+worse than no spec, so the generated one is now the only one.
+
+**Known gap:** the generated spec documents only `200`. Failure responses need
+`@ApiResponse` annotations on the controller before it describes the error
+contract — until then, `SearchErrorCode` is the source of truth for error codes.
 
 ## Known limitations
 

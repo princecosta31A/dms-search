@@ -4,12 +4,12 @@ spring:
   # This service is read-only over Elasticsearch: no datasource, no Mongo,
   # no Kafka. Result lists are served from fields already held in ES; a client
   # needing the full document fetches it from document-service by id.
-  threads:
-    virtual:
-      # Java 21 virtual threads. Search is I/O-bound — nearly all of a request
-      # is spent waiting on the Elasticsearch socket — so a blocking handler on
-      # a virtual thread gives reactive-like concurrency without reactive code.
-      enabled: true
+  #
+  # Virtual threads were enabled here and have been removed. They let the server
+  # ACCEPT thousands of concurrent requests, but concurrency against Elasticsearch
+  # is capped by the REST client's connection pool (10 per node by default), so
+  # the extra acceptance capacity bought nothing. Tomcat's standard 200-thread
+  # pool is already far more than that ceiling, and matches document-service.
 
 server:
   port: ${SEARCH_SERVER_PORT:7008}
@@ -64,6 +64,12 @@ elasticsearch:
   max-result-window: ${ES_MAX_RESULT_WINDOW:10000}
   default-page-size: 20
   max-page-size: 100
+  # Connection pool. The client defaults (10 per route, 30 total, and an
+  # UNBOUNDED wait for a free connection) are the real concurrency ceiling of
+  # this service — not the servlet threads.
+  max-conn-per-route: ${ES_MAX_CONN_PER_ROUTE:50}
+  max-conn-total: ${ES_MAX_CONN_TOTAL:100}
+  connection-request-timeout-ms: ${ES_CONNECTION_REQUEST_TIMEOUT_MS:2000}
 
 management:
   endpoints:

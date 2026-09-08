@@ -144,19 +144,30 @@ public class SearchController {
         List<String> missing = new java.util.ArrayList<>();
         if (isBlank(tenantId)) missing.add(RequestIdentity.HEADER_TENANT);
         if (isBlank(workspaceId)) missing.add(RequestIdentity.HEADER_WORKSPACE);
+        // userId is required alongside the other two. It was optional while it
+        // was audit-only; it is now the SUBJECT of the permission check, and the
+        // old fallback substituted the literal "unknown", which produced two bad
+        // outcomes:
+        //
+        //   1. permission-service answers 404 "User role not found" for that
+        //      subject, which maps to 403 "no read permission in this workspace".
+        //      The caller is told their PERMISSIONS are wrong when the real fault
+        //      is a MISSING HEADER — sending whoever investigates to audit role
+        //      assignments for a problem that does not exist.
+        //   2. SearchAuditLogger records userId=unknown, leaving a
+        //      compliance-relevant search with no subject.
+        //
+        // Rejecting here names the actual fault, and does it before the search
+        // or the permission call runs.
+        if (isBlank(userId)) missing.add(RequestIdentity.HEADER_USER);
+
         if (!missing.isEmpty()) {
             throw new SearchException(
                     SearchErrorCode.MISSING_IDENTITY,
                     "Missing required identity header(s): " + String.join(", ", missing),
                     missing);
         }
-        // userId does not change WHICH documents match — access is
-        // workspace-scoped — but it IS the subject of the permission check, so
-        // it stops being merely audit data once permission.service.enabled is
-        // true. Left optional so the disabled path still works; a blank userId
-        // will simply be denied by permission-service when enabled.
-        return new RequestIdentity(tenantId.strip(), workspaceId.strip(),
-                isBlank(userId) ? "unknown" : userId.strip());
+        return new RequestIdentity(tenantId.strip(), workspaceId.strip(), userId.strip());
     }
 
     private int validateSize(Integer size) {

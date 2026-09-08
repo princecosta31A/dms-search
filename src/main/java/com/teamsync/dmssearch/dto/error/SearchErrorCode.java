@@ -54,6 +54,24 @@ public enum SearchErrorCode {
             "Unsupported API Version",
             "The requested API version is not supported by this service."),
 
+    /**
+     * Elasticsearch rejected the query we built from this request.
+     *
+     * <p>Distinct from {@link #INVALID_PARAMETER}, which means <i>we</i> validated
+     * an input and found it bad. This one means we did not — Elasticsearch did,
+     * and we are relaying its refusal. An unparseable {@code createdFrom}, or a
+     * cursor whose sort values do not match the sort now in effect, land here.
+     *
+     * <p><b>400 and not 503.</b> Elasticsearch answering "that request is
+     * malformed" is an answer, not an outage. Reporting it as 503 tells every
+     * retry policy in the fleet to send the same doomed request again — the same
+     * mistake {@code PermissionValidationService} made with a 404 from
+     * permission-service.
+     */
+    BACKEND_REJECTED_QUERY("SRCH-400-007", HttpStatus.BAD_REQUEST,
+            "Invalid Query",
+            "The search backend rejected this query. Check date formats, cursor and paging values."),
+
     // ---- 403 Forbidden — authenticated, but not allowed here ----
 
     /**

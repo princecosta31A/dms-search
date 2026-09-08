@@ -32,22 +32,37 @@ import java.util.List;
 @Configuration
 public class ElasticsearchConfig {
 
+    /**
+     * How much longer the socket may wait than Elasticsearch itself.
+     *
+     * <p>Elasticsearch must be the one to give up first, so a slow query always
+     * ends as flagged partial results rather than sometimes a dead socket.
+     */
+    private static final int SOCKET_TIMEOUT_FACTOR = 2;
+
     @Bean(destroyMethod = "close")
     public ElasticsearchTransport elasticsearchTransport(ElasticsearchProperties props) {
         RestClientBuilder builder = RestClient.builder(HttpHost.create(props.getHost()));
 
         // API key wins over basic auth: it is the credential that survives a
         // trailing newline in a mounted secret, and the one production uses.
+        //
+        // Credentials are captured here but applied further down, in the SAME
+        // httpClientConfigCallback that configures the pool. There is only one such
+        // callback per builder — setting it twice replaces rather than combines —
+        // so configuring the pool separately would silently drop basic auth and
+        // leave the service connecting unauthenticated.
+        CredentialsProvider credentials = null;
+
         if (hasText(props.getApiKey())) {
             builder.setDefaultHeaders(new org.apache.http.Header[]{
                     new BasicHeader("Authorization", "ApiKey " + props.getApiKey().strip())
             });
             log.info("[ES] Using API key authentication — host={}", props.getHost());
         } else if (hasText(props.getUsername()) && hasText(props.getPassword())) {
-            CredentialsProvider credentials = new BasicCredentialsProvider();
+            credentials = new BasicCredentialsProvider();
             credentials.setCredentials(AuthScope.ANY,
                     new UsernamePasswordCredentials(props.getUsername(), props.getPassword()));
-            builder.setHttpClientConfigCallback(http -> http.setDefaultCredentialsProvider(credentials));
             log.info("[ES] Using basic authentication — host={} user={}",
                     props.getHost(), props.getUsername());
         } else {
@@ -59,9 +74,45 @@ public class ElasticsearchConfig {
 
         // Without these the client waits indefinitely on an unresponsive cluster,
         // holding a request thread rather than failing the search.
+        //
+        // The socket timeout is deliberately LONGER than the Elasticsearch query
+        // timeout (which SearchQueryBuilder sets to requestTimeoutMs). Set equal,
+        // the two race: on a slow query, sometimes the socket dies first and the
+        // caller gets 503, sometimes Elasticsearch answers first with partial
+        // results and complete=false. Same condition, two different outcomes,
+        // decided by whichever clock happens to win.
+        //
+        // Giving the socket headroom makes Elasticsearch always win, so a slow
+        // query has ONE predictable behaviour: partial results, clearly flagged.
+        // The socket timeout then only fires for what it is actually for — a
+        // connection that has stopped responding altogether.
+        int socketTimeoutMs = props.getRequestTimeoutMs() * SOCKET_TIMEOUT_FACTOR;
         builder.setRequestConfigCallback(cfg -> cfg
                 .setConnectTimeout(props.getRequestTimeoutMs())
-                .setSocketTimeout(props.getRequestTimeoutMs()));
+                .setSocketTimeout(socketTimeoutMs)
+                // Caps the wait for a free connection from the pool. Defaults to -1
+                // — wait forever — and that wait is invisible to every other
+                // timeout here, because setSocketTimeout only starts counting once
+                // a connection has actually been leased.
+                .setConnectionRequestTimeout(props.getConnectionRequestTimeoutMs()));
+
+        // ONE httpClientConfigCallback, doing both jobs. Splitting them across two
+        // calls would mean the second silently replaced the first.
+        final CredentialsProvider resolvedCredentials = credentials;
+        builder.setHttpClientConfigCallback(http -> {
+            http.setMaxConnPerRoute(props.getMaxConnPerRoute());
+            http.setMaxConnTotal(props.getMaxConnTotal());
+            if (resolvedCredentials != null) {
+                http.setDefaultCredentialsProvider(resolvedCredentials);
+            }
+            return http;
+        });
+
+        log.info("[ES] Timeouts — connect={}ms esQuery={}ms socket={}ms poolWait={}ms",
+                props.getRequestTimeoutMs(), props.getRequestTimeoutMs(),
+                socketTimeoutMs, props.getConnectionRequestTimeoutMs());
+        log.info("[ES] Connection pool — perRoute={} total={}",
+                props.getMaxConnPerRoute(), props.getMaxConnTotal());
 
         return new RestClientTransport(builder.build(), new JacksonJsonpMapper());
     }

@@ -40,6 +40,25 @@ public class SearchPage {
     /** False when {@link #total} hit the counting cap — display as "10,000+". */
     private boolean totalIsExact;
 
+    /**
+     * Whether Elasticsearch finished the search.
+     *
+     * <p>{@code false} means it hit the server-side timeout and returned only what
+     * the shards had reported so far. Elasticsearch does NOT abort on timeout — it
+     * answers with partial results and a flag, so a truncated search is otherwise
+     * indistinguishable from a complete one: HTTP 200, documents on screen, a total.
+     *
+     * <p>Distinct from {@link #totalIsExact}, which answers a different question:
+     * <pre>
+     *   complete=true  exact=true    finished, counted exactly
+     *   complete=true  exact=false   finished fine; ES just stopped counting at 10,000
+     *   complete=false exact=false   ran out of time — results AND count unreliable
+     *   complete=false exact=true    impossible; forced false in toPage()
+     * </pre>
+     * A healthy broad search is the second row. Only the third is a problem.
+     */
+    private boolean complete;
+
     private boolean hasNext;
 
     /**

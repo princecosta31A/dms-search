@@ -31,6 +31,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.hamcrest.Matchers.hasItem;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -134,14 +135,26 @@ class SearchControllerTest {
     }
 
     @Test
-    @DisplayName("a missing user header is tolerated — it is audit-only")
-    void userHeaderOptional() throws Exception {
-        // Access is workspace-scoped, so userId does not affect which documents
-        // match; refusing the request would be gratuitous.
+    @DisplayName("a missing user header is rejected — it is the permission subject, not audit data")
+    void userHeaderIsRequired() throws Exception {
+        // This test previously asserted 200, on the reasoning that userId does not
+        // affect which documents match. That was true while userId was audit-only.
+        // It is now the subject of the permission check, and the old fallback
+        // substituted "unknown" — which permission-service answers with 404, which
+        // maps to 403 "no read permission in this workspace". A missing header
+        // would have been reported to the caller as a permissions problem.
         mockMvc.perform(get(URL)
                         .header(RequestIdentity.HEADER_TENANT, "t")
                         .header(RequestIdentity.HEADER_WORKSPACE, "w"))
-                .andExpect(status().isOk());
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value(SearchErrorCode.MISSING_IDENTITY.getCode()))
+                // The response must NAME the header, so a gateway misconfiguration
+                // is diagnosable from the error alone.
+                .andExpect(jsonPath("$.details.fields").value(hasItem(RequestIdentity.HEADER_USER)));
+
+        // And nothing downstream ran.
+        verify(permissionValidationService, never()).requireFileRead(any());
+        verify(searchService, never()).search(any(), any());
     }
 
     // ------------------------------------------------------------------

@@ -3,6 +3,8 @@ package com.teamsync.dmssearch.query;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.json.JsonpMapper;
 import co.elastic.clients.json.jackson.JacksonJsonpMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.teamsync.dmssearch.config.ElasticsearchProperties;
 import com.teamsync.dmssearch.dto.request.RequestIdentity;
 import com.teamsync.dmssearch.dto.request.SearchCriteria;
@@ -30,6 +32,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * to catch that is to check every path.
  */
 class SearchQueryBuilderTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private SearchQueryBuilder builder;
     private ElasticsearchProperties props;
@@ -59,6 +63,68 @@ class SearchQueryBuilderTest {
         return SearchCriteria.builder().page(0).size(20);
     }
 
+    private JsonNode tree(String body) {
+        try {
+            return MAPPER.readTree(body);
+        } catch (Exception e) {
+            throw new AssertionError("query body was not valid JSON: " + body, e);
+        }
+    }
+
+    /**
+     * Asserts the boundary clause is a term on {@code field} carrying
+     * {@code expectedValue}, and that it sits in {@code query.bool.filter[]}.
+     *
+     * <p>Structural, not textual. These tests used to assert
+     * {@code body.contains("\"tenantId\"")} and {@code body.contains("tenant-alpha")}
+     * as two INDEPENDENT substring checks — which pass just as happily when the
+     * boundary reads {@code {"term":{"tenantId":"WRONG"}}} and the string
+     * "tenant-alpha" appears somewhere else entirely, as an {@code attr.*} value or
+     * in the sort. They could not prove the field and the value were associated,
+     * which is the only thing that matters here: putting the tenant's id under the
+     * WRONG field is precisely how one tenant ends up reading another's documents.
+     *
+     * <p>Filter context is asserted by walking to the {@code filter} array rather
+     * than comparing string offsets — the previous check compared
+     * {@code indexOf("tenant-alpha") > indexOf("\"filter\"")}, which proves only
+     * that one appears later in the serialised text, and depends on the client's
+     * field ordering rather than on anything this service controls.
+     */
+    private void assertBoundaryFilter(String body, String field, String expectedValue) {
+        JsonNode filters = tree(body).path("query").path("bool").path("filter");
+
+        assertThat(filters.isArray())
+                .as("query.bool.filter must be an array — the boundary lives there, "
+                        + "and nowhere else counts. Body: %s", body)
+                .isTrue();
+
+        boolean found = false;
+        for (JsonNode clause : filters) {
+            JsonNode term = clause.path("term").path(field);
+            if (term.isMissingNode()) {
+                continue;
+            }
+            // The client serialises a term value as {"value": x}; accept a bare
+            // scalar too so this does not break on a client upgrade.
+            String actual = term.has("value") ? term.path("value").asText() : term.asText();
+            if (expectedValue.equals(actual)) {
+                found = true;
+                break;
+            }
+        }
+
+        assertThat(found)
+                .as("query.bool.filter[] must contain term %s = %s. Body: %s",
+                        field, expectedValue, body)
+                .isTrue();
+    }
+
+    /** Both halves of the boundary, on every query. */
+    private void assertBoundary(String body) {
+        assertBoundaryFilter(body, "tenantId", "tenant-alpha");
+        assertBoundaryFilter(body, "workspaceId", "workspace-one");
+    }
+
     // ==================================================================
     @Nested
     @DisplayName("security boundary")
@@ -69,15 +135,14 @@ class SearchQueryBuilderTest {
         void bareQueryStillCarriesBoundary() {
             String body = json(builder.build(base().build(), IDENTITY, 0, null));
 
-            assertThat(body).contains("\"tenantId\"").contains("tenant-alpha");
-            assertThat(body).contains("\"workspaceId\"").contains("workspace-one");
+            assertBoundary(body);
         }
 
         @Test
         @DisplayName("...with free text")
         void withFreeText() {
             String body = json(builder.build(base().q("invoice").build(), IDENTITY, 0, null));
-            assertThat(body).contains("tenant-alpha").contains("workspace-one");
+            assertBoundary(body);
         }
 
         @Test
@@ -102,7 +167,7 @@ class SearchQueryBuilderTest {
                     .build();
 
             String body = json(builder.build(criteria, IDENTITY, 0, null));
-            assertThat(body).contains("tenant-alpha").contains("workspace-one");
+            assertBoundary(body);
         }
 
         @Test
@@ -110,7 +175,7 @@ class SearchQueryBuilderTest {
         void withCursorPaging() {
             String body = json(builder.build(base().build(), IDENTITY, null,
                     List.of(co.elastic.clients.elasticsearch._types.FieldValue.of("x"))));
-            assertThat(body).contains("tenant-alpha").contains("workspace-one");
+            assertBoundary(body);
         }
 
         @Test
@@ -118,12 +183,24 @@ class SearchQueryBuilderTest {
         void boundaryIsInFilterContext() {
             // filter context is unscored and cacheable. Authorisation must never
             // influence ranking, and these clauses repeat on every request.
+            //
+            // This previously compared string offsets — indexOf("tenant-alpha") >
+            // indexOf("\"filter\"") — which proves only that one appears later in
+            // the serialised text. It would pass if the boundary moved into a
+            // nested `should` that happened to serialise afterwards, and it depended
+            // on the client's field ordering, which is not a contract this service
+            // controls.
             String body = json(builder.build(base().q("x").build(), IDENTITY, 0, null));
 
-            int filterAt = body.indexOf("\"filter\"");
-            int tenantAt = body.indexOf("tenant-alpha");
-            assertThat(filterAt).isGreaterThanOrEqualTo(0);
-            assertThat(tenantAt).isGreaterThan(filterAt);
+            assertBoundary(body);
+
+            // And explicitly NOT in must: a scored boundary clause would let
+            // relevance ranking depend on which tenant you are.
+            JsonNode must = tree(body).path("query").path("bool").path("must");
+            assertThat(must.toString())
+                    .as("the boundary must not appear in must — it would be scored. Body: %s", body)
+                    .doesNotContain("tenant-alpha")
+                    .doesNotContain("workspace-one");
         }
 
         @Test
@@ -135,9 +212,27 @@ class SearchQueryBuilderTest {
                     base().attributes(Map.of("tenantId", "other-tenant")).build(),
                     IDENTITY, 0, null));
 
-            assertThat(body).contains("tenant-alpha");
-            // the spoofed value can only land under attr.*, never as the boundary
-            assertThat(body).contains("attr.tenantId");
+            // The boundary still carries the REAL identity...
+            assertBoundary(body);
+
+            // ...and the spoofed value landed under attr.*, prefixed, where it is
+            // an ordinary attribute lookup and cannot act as the boundary.
+            assertBoundaryFilter(body, "attr.tenantId", "other-tenant");
+
+            // The decisive assertion: there is exactly ONE tenantId term in the
+            // filter array, and it holds the identity value. A substring check for
+            // "tenant-alpha" could not catch a second, spoofed tenantId clause
+            // sitting alongside it.
+            JsonNode filters = tree(body).path("query").path("bool").path("filter");
+            long tenantIdClauses = 0;
+            for (JsonNode clause : filters) {
+                if (!clause.path("term").path("tenantId").isMissingNode()) {
+                    tenantIdClauses++;
+                }
+            }
+            assertThat(tenantIdClauses)
+                    .as("exactly one tenantId boundary clause. Body: %s", body)
+                    .isEqualTo(1);
         }
     }
 
