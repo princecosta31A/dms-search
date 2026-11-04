@@ -1,21 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-<appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
-<encoder>
-<pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %highlight(%-5level) [%thread] [TraceId=%X{trace_id}] [SpanId=%X{span_id}] [correlationId=%X{correlation.id:-none}] [tenantId=%X{tenant.id:-none}] [workspaceId=%X{workspace.id:-none}] %logger{36} - %msg%n</pattern>
-</encoder>
-</appender>
- 
+    <!-- Console Appender with TraceId, SpanId, and OTel Baggage Fields from MDC -->
+    <!--
+        trace_id / span_id are written by the OTel (EDOT) agent's logback-mdc instrumentation.
+        correlation.id / tenant.id / workspace.id / user.id / session.id are written by
+        RequestContextMdcFilter (and by Micrometer for the keys listed in
+        management.tracing.baggage.correlation.fields). Keep this list in step with both, and with
+        document-service's pattern, so one Kibana query matches lines from either service.
+    -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %highlight(%-5level) [%thread] [traceId=%X{trace_id}] [spanId=%X{span_id}] [correlationId=%X{correlation.id:-none}] [tenantId=%X{tenant.id:-none}] [workspaceId=%X{workspace.id:-none}] [userId=%X{user.id:-none}] [sessionId=%X{session.id:-none}] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
     <!-- Root Logger -->
-<root level="INFO">
-<appender-ref ref="CONSOLE" />
-</root>
- 
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+    </root>
+
     <!-- Reduce noise from Spring Boot internals -->
-<logger name="org.springframework" level="WARN"/>
-<logger name="org.apache.catalina" level="WARN"/>
-<logger name="org.apache.tomcat" level="WARN"/>
-<logger name="org.hibernate" level="WARN"/>
+    <logger name="org.springframework" level="WARN"/>
+    <logger name="org.apache.catalina" level="WARN"/>
+    <logger name="org.apache.tomcat" level="WARN"/>
+    <logger name="org.hibernate" level="WARN"/>
 
     <!-- Application logs -->
     <logger name="com.teamsync.dmssearch" level="INFO"/>

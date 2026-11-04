@@ -3,13 +3,13 @@ package com.teamsync.dmssearch.dto.response;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import io.opentelemetry.api.baggage.Baggage;
 import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.Instant;
-import java.util.UUID;
 
 /**
  * The platform response envelope, matching document-service field-for-field.
@@ -73,20 +73,22 @@ public class ApiResponse<T> {
      * Builds the per-response diagnostics.
      *
      * <p>The correlation id is taken from OpenTelemetry baggage so it survives
-     * across service hops; when absent (a request that did not come through the
-     * gateway, or baggage propagation being off) a fresh one is generated rather
-     * than left null — an unqueryable response is worse than a non-correlated one.
+     * across service hops. When absent it is left out (the field is
+     * {@code NON_NULL}), matching document-service. This used to generate a
+     * fresh UUID instead, but that id was written nowhere else — not to the log
+     * line, not to the span — so quoting it in a bug report found nothing. An
+     * honest gap is better than an id that looks searchable and is not.
+     *
+     * <p>{@code traceId} is likewise omitted when there is no valid span, rather
+     * than returned as the all-zero id OpenTelemetry uses for "no trace".
      */
     private static ResponseMetadata metadata() {
-        String traceId = Span.current().getSpanContext().getTraceId();
+        SpanContext span = Span.current().getSpanContext();
         String correlationId = Baggage.current().getEntryValue("correlation.id");
-        if (correlationId == null || correlationId.isBlank()) {
-            correlationId = UUID.randomUUID().toString();
-        }
         return ResponseMetadata.builder()
                 .timestamp(Instant.now())
-                .traceId(traceId)
-                .correlationId(correlationId)
+                .traceId(span.isValid() ? span.getTraceId() : null)
+                .correlationId(correlationId == null || correlationId.isBlank() ? null : correlationId)
                 .build();
     }
 }

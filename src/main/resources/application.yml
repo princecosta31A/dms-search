@@ -79,6 +79,26 @@ elasticsearch:
   connection-request-timeout-ms: ${ES_CONNECTION_REQUEST_TIMEOUT_MS:2000}
 
 management:
+  # Same block as document-service, so the two services sample, propagate and
+  # tag identically. The EDOT agent does the heavy lifting when attached; this
+  # covers a run without it (local) and keeps Micrometer's view consistent.
+  #
+  # Two deliberate differences from document-service's copy:
+  #   - remote-fields says correlation.id, not correlationId. The gateway, the
+  #     MDC filter and the log pattern all use the dotted key; correlationId
+  #     matched nothing.
+  #   - workspace.id is listed. This service filters on it, so it is the field
+  #     most worth seeing on a search's log lines and spans.
+  tracing:
+    sampling:
+      probability: 1.0
+    propagation:
+      type: w3c
+    baggage:
+      remote-fields: correlation.id,tenant.id,workspace.id,user.id,session.id
+      correlation:
+        fields: correlation.id,tenant.id,workspace.id,user.id,session.id
+      tag-fields: correlation.id,tenant.id,workspace.id
   endpoints:
     web:
       exposure:
