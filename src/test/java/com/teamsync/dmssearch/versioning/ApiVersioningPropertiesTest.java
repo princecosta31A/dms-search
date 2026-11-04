@@ -43,7 +43,9 @@ class ApiVersioningPropertiesTest {
                 .as("this threw NullPointerException before @DefaultValue was added")
                 .doesNotThrowAnyException();
 
-        assertThat(props.supportedVersionsArray()).containsExactly("1.0");
+        // Both versions, not just the default one: a trimmed ConfigMap must not
+        // quietly turn v1.1 into a 400 for every caller that asks for it.
+        assertThat(props.supportedVersionsArray()).containsExactly("1.0", "1.1");
         assertThat(props.defaultVersion()).isEqualTo("1.0");
         assertThat(props.headerName()).isEqualTo("X-API-Version");
     }
@@ -56,7 +58,7 @@ class ApiVersioningPropertiesTest {
         ApiVersioningProperties props = bind(Map.of("api.versioning.header-name", "X-Version"));
 
         assertThat(props.headerName()).isEqualTo("X-Version");
-        assertThat(props.supportedVersionsArray()).containsExactly("1.0");
+        assertThat(props.supportedVersionsArray()).containsExactly("1.0", "1.1");
         assertThat(props.defaultVersion()).isEqualTo("1.0");
     }
 

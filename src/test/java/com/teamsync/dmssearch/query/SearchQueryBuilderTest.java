@@ -46,7 +46,10 @@ class SearchQueryBuilderTest {
         props = new ElasticsearchProperties();
         props.setIndex("dms-documents");
         props.setRequestTimeoutMs(5000);
-        builder = new SearchQueryBuilder(props);
+        // Real TenantFilter, not a mock: it is what puts the tenant/workspace
+        // clauses on every query, and the assertions below exist to prove they
+        // are there. Mocking it would remove the thing under test.
+        builder = new SearchQueryBuilder(props, new TenantFilter());
     }
 
     /** Serialises the request to JSON so assertions read like the wire format. */

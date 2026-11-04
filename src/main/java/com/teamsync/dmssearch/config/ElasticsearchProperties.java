@@ -20,6 +20,20 @@ public class ElasticsearchProperties {
      */
     private String index = "dms-documents";
 
+    /**
+     * The LEGACY production index, queried by API version 1.0.
+     *
+     * <p>A concrete index name, not an alias — deliberately breaking the rule
+     * above, because this index has no alias in production and creating one
+     * there is a separate change v1.0 must not depend on.
+     *
+     * <p>This is the index the current {@code es-ingestion}/{@code es-update}
+     * pipeline writes to. The optimized pipeline that writes {@link #index} is
+     * built and dev-tested but not deployed, so until it is, v1.0 is the only
+     * version with data behind it and is therefore the default version.
+     */
+    private String legacyIndex = "teamsync-dms-documents";
+
     /** Optional basic auth. Ignored when {@link #apiKey} is set. */
     private String username;
     private String password;

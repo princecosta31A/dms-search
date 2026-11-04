@@ -13,15 +13,21 @@ import java.util.List;
  * URL path.
  *
  * <pre>
- * api.versioning.supported-versions=1.0
+ * api.versioning.supported-versions=1.0,1.1
  * api.versioning.default-version=1.0
  * api.versioning.header-name=X-API-Version
  * </pre>
  *
- * <p>Deliberately smaller than document-service's equivalent: this service has
- * exactly one version, so there is nothing to deprecate and no sunset policy to
- * express. Add that machinery when a second version actually exists — carrying
- * it now would be dead configuration that still has to be understood.
+ * <p>Two versions exist: <b>1.0</b> queries the legacy mapping that production
+ * runs today, <b>1.1</b> the optimized mapping. 1.0 is the default because the
+ * pipeline populating the optimized index is not yet deployed there, so a caller
+ * that omits the header must reach the index that actually holds documents.
+ *
+ * <p>Still deliberately smaller than document-service's equivalent: no
+ * deprecation or sunset policy. v1.0 is not a deprecated version to be phased
+ * out over releases — it is deleted outright, along with the whole {@code legacy}
+ * package, on the day production migrates. Sunset machinery would be dead
+ * configuration that still has to be understood.
  *
  * <p><b>Every value has a {@code @DefaultValue}.</b> A record binds by constructor,
  * so without one a missing {@code api.versioning.*} block binds
@@ -34,7 +40,7 @@ import java.util.List;
  */
 @ConfigurationProperties(prefix = "api.versioning")
 public record ApiVersioningProperties(
-        @DefaultValue("1.0") List<String> supportedVersions,
+        @DefaultValue({"1.0", "1.1"}) List<String> supportedVersions,
         @DefaultValue("1.0") String defaultVersion,
         @DefaultValue("X-API-Version") String headerName
 ) {

@@ -11,14 +11,13 @@ import com.teamsync.dmssearch.config.ElasticsearchProperties;
 import com.teamsync.dmssearch.dto.error.SearchErrorCode;
 import com.teamsync.dmssearch.dto.request.RequestIdentity;
 import com.teamsync.dmssearch.dto.request.SearchCriteria;
-import com.teamsync.dmssearch.dto.response.DocumentSummary;
+import com.teamsync.dmssearch.dto.response.SearchHit;
 import com.teamsync.dmssearch.dto.response.SearchPage;
 import com.teamsync.dmssearch.exception.SearchException;
 import com.teamsync.dmssearch.query.CursorCodec;
-import com.teamsync.dmssearch.query.SearchQueryBuilder;
+import com.teamsync.dmssearch.query.QueryBuilder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -28,19 +27,51 @@ import java.util.List;
  *
  * <p>Read-only by construction: this service issues {@code _search} and nothing
  * else. es-ingestion owns document creation; es-update owns mutation.
+ *
+ * <h2>One executor, two mappings</h2>
+ * Deliberately NOT annotated {@code @Service}. Two instances exist — one per API
+ * version — created in {@code SearchServiceConfig}, each wired with its own
+ * {@link QueryBuilder}:
+ *
+ * <ul>
+ *   <li>v1.0 with {@code LegacyQueryBuilder} over the legacy production index</li>
+ *   <li>v1.1 with {@code SearchQueryBuilder} over the optimized index</li>
+ * </ul>
+ *
+ * <p>Nothing in this class knows a field name, a query shape, or which DTO it is
+ * deserialising into — the builder supplies all three. What lives here is the
+ * part that is identical for any mapping and genuinely hard to get right:
+ * distinguishing a rejected query from an unavailable cluster, the offset-window
+ * guard, cursor paging, and noticing that Elasticsearch returned PARTIAL results
+ * rather than reporting a truncated search as a complete one.
+ *
+ * <p>Duplicating that per version is what this arrangement avoids. Two copies of
+ * this logic would drift, and the half that drifts is the half nobody is
+ * currently looking at.
  */
 @Slf4j
-@Service
 @RequiredArgsConstructor
 public class SearchService {
 
     private final ElasticsearchClient es;
-    private final SearchQueryBuilder queryBuilder;
+    private final QueryBuilder queryBuilder;
     private final ElasticsearchProperties props;
     private final CursorCodec cursorCodec;
     private final SearchAuditLogger auditLogger;
 
+    /**
+     * Runs the search for whichever mapping this instance was wired with.
+     *
+     * <p>Delegates immediately so the body can be generic over the result DTO:
+     * the builder names its own type, and nothing in here needs to know which.
+     */
     public SearchPage search(SearchCriteria criteria, RequestIdentity identity) {
+        return doSearch(criteria, identity, queryBuilder.documentType());
+    }
+
+    private <T extends SearchHit> SearchPage doSearch(SearchCriteria criteria,
+                                                      RequestIdentity identity,
+                                                      Class<T> documentType) {
         boolean byCursor = criteria.getCursor() != null && !criteria.getCursor().isBlank();
 
         Integer from = null;
@@ -62,9 +93,9 @@ public class SearchService {
         SearchRequest request = queryBuilder.build(criteria, identity, from, searchAfter);
 
         long startedNanos = System.nanoTime();
-        SearchResponse<DocumentSummary> response;
+        SearchResponse<T> response;
         try {
-            response = es.search(request, DocumentSummary.class);
+            response = es.search(request, documentType);
         } catch (ElasticsearchException e) {
             // Elasticsearch ANSWERED — with a status. A 4xx means it read our
             // request and refused it, so the query we built was malformed: an
@@ -137,15 +168,15 @@ public class SearchService {
         }
     }
 
-    private SearchPage toPage(SearchResponse<DocumentSummary> response,
-                              SearchCriteria criteria,
-                              boolean byCursor) {
+    private <T extends SearchHit> SearchPage toPage(SearchResponse<T> response,
+                                                    SearchCriteria criteria,
+                                                    boolean byCursor) {
 
-        List<Hit<DocumentSummary>> hits = response.hits().hits();
-        List<DocumentSummary> items = new ArrayList<>(hits.size());
+        List<Hit<T>> hits = response.hits().hits();
+        List<T> items = new ArrayList<>(hits.size());
 
-        for (Hit<DocumentSummary> hit : hits) {
-            DocumentSummary doc = hit.source();
+        for (Hit<T> hit : hits) {
+            T doc = hit.source();
             if (doc == null) {
                 continue;
             }

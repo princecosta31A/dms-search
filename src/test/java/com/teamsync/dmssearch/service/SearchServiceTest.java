@@ -14,6 +14,7 @@ import com.teamsync.dmssearch.dto.response.DocumentSummary;
 import com.teamsync.dmssearch.dto.response.SearchPage;
 import com.teamsync.dmssearch.query.CursorCodec;
 import com.teamsync.dmssearch.query.SearchQueryBuilder;
+import com.teamsync.dmssearch.query.TenantFilter;
 import com.teamsync.dmssearch.exception.SearchException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -60,7 +61,7 @@ class SearchServiceTest {
 
         service = new SearchService(
                 es,
-                new SearchQueryBuilder(props),
+                new SearchQueryBuilder(props, new TenantFilter()),
                 props,
                 new CursorCodec(),
                 mock(SearchAuditLogger.class));

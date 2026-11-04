@@ -36,7 +36,7 @@ import java.util.Map;
 @AllArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)
-public class DocumentSummary {
+public class DocumentSummary implements SearchHit {
 
     private String documentId;
 

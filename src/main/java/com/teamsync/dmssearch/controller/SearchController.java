@@ -10,7 +10,7 @@ import com.teamsync.dmssearch.dto.response.SearchPage;
 import com.teamsync.dmssearch.exception.SearchException;
 import com.teamsync.dmssearch.service.PermissionValidationService;
 import com.teamsync.dmssearch.service.SearchService;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -30,33 +30,91 @@ import java.util.Map;
  * (replacing document-service's hardcoded {@code /search/token}, {@code /pan}
  * and {@code /acknowledgement} routes) and free-text discovery. Which query
  * Elasticsearch runs depends on which parameters arrive, not on which URL was
- * called — see {@code SearchQueryBuilder}.
+ * called.
  *
- * <p><b>Versioning</b> is header-based ({@code X-API-Version: 1.0}), matching
+ * <h2>Two versions, two mappings</h2>
+ * The same URL and the same query parameters serve two different index mappings,
+ * selected by {@code X-API-Version}:
+ *
+ * <table border="1">
+ *   <tr><th></th><th>1.0 (default)</th><th>1.1</th></tr>
+ *   <tr><td>index</td><td>legacy, running in production</td>
+ *       <td>optimized</td></tr>
+ *   <tr><td>response shape</td><td>legacy snake_case, {@code attributes} as a LIST</td>
+ *       <td>camelCase, {@code attr} as an OBJECT</td></tr>
+ *   <tr><td>archive filter</td><td>unsupported (no such field)</td><td>supported</td></tr>
+ *   <tr><td>filter by documentTypeId</td><td>rejected with 400</td><td>supported</td></tr>
+ * </table>
+ *
+ * <p><b>1.0 is the default</b>, and that is not a stylistic choice: the pipeline
+ * that populates the optimized index is built but not yet deployed to
+ * production, so v1.1 has no data behind it there. A caller that omits the
+ * header must reach the index that actually holds documents.
+ *
+ * <p>The <i>request</i> contract is identical across both versions — same
+ * parameters, same validation, same paging. Only the backing index and the
+ * <i>response</i> shape differ, which is precisely what makes this a version
+ * boundary rather than a silent behaviour change. When production migrates to
+ * the optimized mapping, v1.0 and everything in the {@code legacy} package are
+ * deleted together.
+ *
+ * <p><b>Versioning</b> is header-based ({@code X-API-Version}), matching
  * document-service — the path carries no version segment. See
- * {@code WebConfig#configureApiVersioning}. A default version is configured, so
- * omitting the header resolves to 1.0 rather than failing.
+ * {@code WebConfig#configureApiVersioning}.
  *
  * <p>Note {@code GET}, not {@code POST /search}: this is a read. Keeping it a
  * GET means it is cacheable, bookmarkable, and honest about HTTP semantics.
  */
 @RestController
 @RequestMapping("/api/search")
-@RequiredArgsConstructor
 public class SearchController {
 
-    /** The version this controller serves. Bumped only alongside a real contract change. */
-    private static final String API_VERSION = "1.0";
+    /** The legacy mapping — what production runs today. */
+    private static final String V1_0 = "1.0";
+
+    /** The optimized mapping — built, not yet deployed to production. */
+    private static final String V1_1 = "1.1";
 
     private static final String ATTR_PREFIX = "attr.";
     private static final String FOLDER_ATTR_PREFIX = "folderAttr.";
 
-    private final SearchService searchService;
+    private final SearchService legacySearchService;
+    private final SearchService optimizedSearchService;
     private final ElasticsearchProperties props;
     private final PermissionValidationService permissionValidationService;
 
-    @GetMapping(value = "/documents", produces = MediaType.APPLICATION_JSON_VALUE, version = API_VERSION)
-    public ResponseEntity<ApiResponse<SearchPage>> searchDocuments(
+    /**
+     * Explicit constructor rather than {@code @RequiredArgsConstructor}: two
+     * beans of the same type need {@code @Qualifier}, and Lombok does not copy
+     * that annotation onto generated constructor parameters unless configured
+     * to. Writing it out keeps the wiring unambiguous and compile-checked.
+     */
+    public SearchController(@Qualifier("legacySearchService") SearchService legacySearchService,
+                            @Qualifier("optimizedSearchService") SearchService optimizedSearchService,
+                            ElasticsearchProperties props,
+                            PermissionValidationService permissionValidationService) {
+        this.legacySearchService = legacySearchService;
+        this.optimizedSearchService = optimizedSearchService;
+        this.props = props;
+        this.permissionValidationService = permissionValidationService;
+    }
+
+    // ==================================================================
+    // v1.0 — legacy mapping (default)
+    // ==================================================================
+
+    /**
+     * Search against the LEGACY production index.
+     *
+     * <p>The parameter list is declared again on the v1.1 handler below rather
+     * than factored into a bound object. That duplication is deliberate: the
+     * {@code @RequestParam} declarations ARE the HTTP contract, and Spring
+     * resolves the version at the handler-mapping level, so each version needs
+     * its own mapped method. Everything past parameter binding is shared — both
+     * handlers hand off to {@link #executeSearch}.
+     */
+    @GetMapping(value = "/documents", produces = MediaType.APPLICATION_JSON_VALUE, version = V1_0)
+    public ResponseEntity<ApiResponse<SearchPage>> searchDocumentsV10(
             @RequestHeader(value = RequestIdentity.HEADER_TENANT, required = false) String tenantId,
             @RequestHeader(value = RequestIdentity.HEADER_WORKSPACE, required = false) String workspaceId,
             @RequestHeader(value = RequestIdentity.HEADER_USER, required = false) String userId,
@@ -84,9 +142,84 @@ public class SearchController {
             @RequestParam(required = false) String cursor,
             @RequestParam(required = false) String sort,
 
-            // Captures the dynamic attr.* / folderAttr.* parameters, whose keys
-            // are tenant-defined and therefore cannot be declared up front.
             @RequestParam Map<String, String> allParams) {
+
+        return executeSearch(legacySearchService,
+                tenantId, workspaceId, userId,
+                q, documentTypeName, documentTypeId, folderId, folderTypeId, folderTypeName,
+                folderLifecycleState, fileExt, validationStatus,
+                createdFrom, createdTo, updatedFrom, updatedTo,
+                includeDeleted, includeArchived,
+                page, size, cursor, sort, allParams);
+    }
+
+    // ==================================================================
+    // v1.1 — optimized mapping
+    // ==================================================================
+
+    /** Search against the OPTIMIZED index. Same request contract as v1.0. */
+    @GetMapping(value = "/documents", produces = MediaType.APPLICATION_JSON_VALUE, version = V1_1)
+    public ResponseEntity<ApiResponse<SearchPage>> searchDocumentsV11(
+            @RequestHeader(value = RequestIdentity.HEADER_TENANT, required = false) String tenantId,
+            @RequestHeader(value = RequestIdentity.HEADER_WORKSPACE, required = false) String workspaceId,
+            @RequestHeader(value = RequestIdentity.HEADER_USER, required = false) String userId,
+
+            @RequestParam(required = false) String q,
+            @RequestParam(required = false) String documentTypeName,
+            @RequestParam(required = false) String documentTypeId,
+            @RequestParam(required = false) String folderId,
+            @RequestParam(required = false) String folderTypeId,
+            @RequestParam(required = false) String folderTypeName,
+            @RequestParam(required = false) String folderLifecycleState,
+            @RequestParam(required = false) String fileExt,
+            @RequestParam(required = false) String validationStatus,
+
+            @RequestParam(required = false) String createdFrom,
+            @RequestParam(required = false) String createdTo,
+            @RequestParam(required = false) String updatedFrom,
+            @RequestParam(required = false) String updatedTo,
+
+            @RequestParam(defaultValue = "false") boolean includeDeleted,
+            @RequestParam(defaultValue = "false") boolean includeArchived,
+
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(required = false) Integer size,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(required = false) String sort,
+
+            @RequestParam Map<String, String> allParams) {
+
+        return executeSearch(optimizedSearchService,
+                tenantId, workspaceId, userId,
+                q, documentTypeName, documentTypeId, folderId, folderTypeId, folderTypeName,
+                folderLifecycleState, fileExt, validationStatus,
+                createdFrom, createdTo, updatedFrom, updatedTo,
+                includeDeleted, includeArchived,
+                page, size, cursor, sort, allParams);
+    }
+
+    // ==================================================================
+    // shared: identical for every version
+    // ==================================================================
+
+    /**
+     * Identity resolution, permission check, validation, criteria assembly and
+     * response shaping — all version-independent.
+     *
+     * <p>The ONLY thing a version changes is which {@link SearchService} runs the
+     * query. Everything that could be got wrong about authorisation or paging is
+     * therefore written once.
+     */
+    private ResponseEntity<ApiResponse<SearchPage>> executeSearch(
+            SearchService searchService,
+            String tenantId, String workspaceId, String userId,
+            String q, String documentTypeName, String documentTypeId,
+            String folderId, String folderTypeId, String folderTypeName,
+            String folderLifecycleState, String fileExt, String validationStatus,
+            String createdFrom, String createdTo, String updatedFrom, String updatedTo,
+            boolean includeDeleted, boolean includeArchived,
+            int page, Integer size, String cursor, String sort,
+            Map<String, String> allParams) {
 
         RequestIdentity identity = resolveIdentity(tenantId, workspaceId, userId);
 
@@ -211,6 +344,12 @@ public class SearchController {
     /**
      * Pulls {@code attr.x=y} / {@code folderAttr.x=y} out of the raw parameter
      * map, keyed by the part after the prefix.
+     *
+     * <p>The prefixes stay {@code attr.} / {@code folderAttr.} on BOTH versions
+     * even though the legacy index spells those fields {@code attributes} and
+     * {@code folder_type_attributes}. They are the API vocabulary, not field
+     * names — each query builder maps them onto its own mapping, so a client
+     * changing version does not have to rewrite its query strings.
      */
     private Map<String, String> extractPrefixed(Map<String, String> allParams, String prefix) {
         Map<String, String> extracted = new LinkedHashMap<>();

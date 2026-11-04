@@ -21,7 +21,9 @@ server:
 # version segment; the version travels in X-API-Version.
 api:
   versioning:
-    supported-versions: ${API_SUPPORTED_VERSIONS:1.0}
+    # 1.0 = legacy mapping (what production runs today)
+    # 1.1 = optimized mapping (built, pipeline not yet deployed to production)
+    supported-versions: ${API_SUPPORTED_VERSIONS:1.0,1.1}
     # Omitting the header resolves to this rather than returning 400 — keeps
     # curl and browser exploration frictionless while still allowing clients to pin.
     #
@@ -53,8 +55,13 @@ permission:
 
 elasticsearch:
   host: ${ES_HOST_URL:http://localhost:9200}
+  # API version 1.1 — the optimized mapping.
   # The ALIAS, never a concrete index. See ElasticsearchProperties.
   index: ${ES_INDEX:dms-documents}
+  # API version 1.0 — the LEGACY mapping that production ingests into today.
+  # A concrete index name: this one has no alias in production, and creating one
+  # there is a separate change v1.0 must not depend on.
+  legacy-index: ${ES_LEGACY_INDEX:teamsync-dms-documents}
   # Optional auth — leave unset for a local cluster with security disabled.
   api-key: ${ES_API_KEY:}
   username: ${ES_USER:}

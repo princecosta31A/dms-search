@@ -19,7 +19,18 @@ import java.util.List;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class SearchPage {
 
-    private List<DocumentSummary> items;
+    /**
+     * The hits, as the DTO of whichever API version served the request:
+     * {@code DocumentSummary} for v1.1, {@code LegacyDocumentSummary} for v1.0.
+     *
+     * <p>Wildcard rather than a concrete type because the two versions return
+     * genuinely different shapes — legacy carries {@code attributes} as a LIST
+     * of key/value objects, optimized carries {@code attr} as a flat object — and
+     * reshaping one into the other is exactly what a version boundary exists to
+     * avoid. Jackson serialises the runtime type, so each version emits its own
+     * fields.
+     */
+    private List<?> items;
 
     /** Zero-based. Null when paging by cursor. */
     private Integer page;

@@ -3,8 +3,9 @@
 Read-only search API over the Elasticsearch document index. Users never reach
 Elasticsearch or Kibana directly.
 
-- **Port** 7008 · **Java** 21 · **Spring Boot** 4.0.6
-- **Reads** the alias `dms-documents` — never a concrete index name
+- **Port** 7008 · **Java** 21 · **Spring Boot** 4.0.9
+- **Reads two indexes, one per API version** — v1.1 the alias `dms-documents`,
+  v1.0 the legacy index `teamsync-dms-documents` (see [Versioning](#versioning))
 - **No Mongo, no Kafka, no Consul.** It only queries Elasticsearch.
 - Writes are owned elsewhere: es-ingestion creates documents, es-update mutates them
 
@@ -16,14 +17,41 @@ Header-based, matching document-service — the path carries no version segment:
 X-API-Version: 1.0
 ```
 
-| Version | Status | Sunset |
+| Version | Index | Mapping | Status |
+|---|---|---|---|
+| **1.0** (default) | `teamsync-dms-documents` | legacy — what production ingests into today | Current |
+| **1.1** | `dms-documents` (alias) | optimized — pipeline not yet deployed to production | Available |
+
+**1.0 is the default on purpose.** The es-ingestion/es-update changes that
+populate the optimized index are built and dev-tested but **not deployed**, so in
+production v1.1 has no data behind it. A caller that omits the header must reach
+the index that actually holds documents.
+
+The **request** contract is identical across both versions — same parameters,
+same validation, same paging. What differs is the backing index, the **response
+shape**, and which capabilities exist:
+
+| | 1.0 | 1.1 |
 |---|---|---|
-| **1.0** | Current | — |
+| `attributes` / `attr` in the response | a **list** of `{key, value}` | a flat **object** |
+| field naming | `snake_case` | `camelCase` |
+| `includeArchived` | ignored — no such field in the mapping | honoured |
+| filter by `documentTypeId` | **400** — not indexed | honoured |
+| subtree search | impossible — `path` holds a bare folder id | n/a |
+| date/number ranges on attributes | no — `value_date`/`value_number` never populated | n/a |
+| free text | three clauses: document name, nested attribute values, folder attributes | one `searchAll` field |
+
+Relevance scores are **not comparable between versions**: v1.1 scores a single
+`searchAll` field, v1.0 combines three heterogeneous clauses. Ordering within one
+result set is still meaningful.
+
+v1.0 is not a deprecated version to be phased out over releases — it is deleted
+outright, along with the whole `legacy` package, on the day production migrates
+to the optimized mapping. That is why there is no sunset column.
 
 Omitting the header resolves to the default (`1.0`) rather than returning 400, so
-curl and browser exploration stay frictionless. Clients that want stability
-should send it explicitly, so a future `1.1` cannot change their behaviour
-silently.
+curl and browser exploration stay frictionless. Clients should still send it
+explicitly — the response shape depends on it.
 
 Configured in `WebConfig#configureApiVersioning` via Spring Framework 7's native
 API versioning; supported/default versions come from `api.versioning.*`.
@@ -218,7 +246,10 @@ intended trade — correlate with `traceId` and ask the user what they typed.
 |---|---|---|
 | `SEARCH_SERVER_PORT` | `7008` | |
 | `ES_HOST_URL` | `http://localhost:9200` | |
-| `ES_INDEX` | `dms-documents` | The **alias** |
+| `ES_INDEX` | `dms-documents` | API v1.1 — the **alias** |
+| `ES_LEGACY_INDEX` | `teamsync-dms-documents` | API v1.0 — a **concrete index**, not an alias: this one has none in production, and creating one there is a separate change v1.0 must not depend on |
+| `API_SUPPORTED_VERSIONS` | `1.0,1.1` | |
+| `API_DEFAULT_VERSION` | `1.0` | The legacy mapping — the only version with production data |
 | `ES_API_KEY` | — | base64 `id:key`; wins over basic auth |
 | `ES_USER` / `ES_PASSWORD` | — | |
 | `ES_REQUEST_TIMEOUT_MS` | `5000` | |

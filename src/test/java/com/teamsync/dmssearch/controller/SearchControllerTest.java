@@ -49,12 +49,23 @@ class SearchControllerTest {
     private static final String URL = "/api/search/documents";
 
     private MockMvc mockMvc;
+
+    /**
+     * The v1.0 (legacy mapping) service. Named without a suffix because 1.0 is
+     * the DEFAULT version, so every test that sends no {@code X-API-Version}
+     * header lands here.
+     */
     private SearchService searchService;
+
+    /** The v1.1 (optimized mapping) service. */
+    private SearchService optimizedSearchService;
+
     private PermissionValidationService permissionValidationService;
 
     @BeforeEach
     void setUp() {
         searchService = mock(SearchService.class);
+        optimizedSearchService = mock(SearchService.class);
         // Mocked, so the default is "permission granted" — every existing test
         // exercises the happy path. The denial and outage paths are asserted
         // explicitly below.
@@ -62,29 +73,39 @@ class SearchControllerTest {
         ElasticsearchProperties props = new ElasticsearchProperties();
 
         mockMvc = MockMvcBuilders
-                .standaloneSetup(new SearchController(searchService, props, permissionValidationService))
+                .standaloneSetup(new SearchController(
+                        searchService, optimizedSearchService, props, permissionValidationService))
                 .setControllerAdvice(new GlobalExceptionHandler())
-                // Required: the controller declares version = "1.0", and a mapping
-                // with a version cannot resolve without a strategy. Built to mirror
-                // WebConfig#configureApiVersioning so these tests exercise the real
-                // versioning behaviour rather than a bypass of it.
+                // Required: the controller handlers declare versions, and a
+                // mapping with a version cannot resolve without a strategy.
+                // Built to mirror WebConfig#configureApiVersioning so these
+                // tests exercise the real versioning behaviour rather than a
+                // bypass of it.
                 .setApiVersionStrategy(apiVersionStrategy())
                 .build();
 
         when(searchService.search(any(), any())).thenReturn(emptyPage());
+        when(optimizedSearchService.search(any(), any())).thenReturn(emptyPage());
     }
 
-    /** Mirrors WebConfig: X-API-Version header, semantic parsing, default 1.0. */
+    /**
+     * Mirrors WebConfig: X-API-Version header, semantic parsing, default 1.0.
+     *
+     * <p>Both versions are registered. 1.0 is the default because the pipeline
+     * feeding the v1.1 index is not yet deployed to production, so an
+     * unversioned request must reach the index that actually holds documents.
+     */
     private static DefaultApiVersionStrategy apiVersionStrategy() {
         DefaultApiVersionStrategy strategy = new DefaultApiVersionStrategy(
                 List.of(new HeaderApiVersionResolver("X-API-Version")),
                 new SemanticApiVersionParser(),
                 false,          // version not required — a default is configured
-                "1.0",          // default version
+                "1.0",          // default version — the legacy mapping
                 false,          // do not auto-detect supported versions
                 null,           // no supported-version predicate
-                null);          // no deprecation handler — only one version exists
+                null);          // no deprecation handler — see ApiVersioningProperties
         strategy.addSupportedVersion("1.0");
+        strategy.addSupportedVersion("1.1");
         return strategy;
     }
 
@@ -233,6 +254,50 @@ class SearchControllerTest {
     void explicitVersionAccepted() throws Exception {
         mockMvc.perform(withIdentity(get(URL)).header("X-API-Version", "1.0"))
                 .andExpect(status().isOk());
+    }
+
+    @Test
+    @DisplayName("X-API-Version: 1.1 resolves the endpoint")
+    void version11Accepted() throws Exception {
+        mockMvc.perform(withIdentity(get(URL)).header("X-API-Version", "1.1"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @DisplayName("1.0 queries the legacy mapping and never the optimized one")
+    void version10RoutesToLegacy() throws Exception {
+        mockMvc.perform(withIdentity(get(URL)).header("X-API-Version", "1.0"))
+                .andExpect(status().isOk());
+
+        // The whole point of the version split. Routing 1.0 at the optimized
+        // index would search an index production does not populate and return
+        // an empty page that looks like "no documents found".
+        verify(searchService).search(any(), any());
+        verify(optimizedSearchService, never()).search(any(), any());
+    }
+
+    @Test
+    @DisplayName("1.1 queries the optimized mapping and never the legacy one")
+    void version11RoutesToOptimized() throws Exception {
+        mockMvc.perform(withIdentity(get(URL)).header("X-API-Version", "1.1"))
+                .andExpect(status().isOk());
+
+        verify(optimizedSearchService).search(any(), any());
+        verify(searchService, never()).search(any(), any());
+    }
+
+    @Test
+    @DisplayName("omitting the version header queries the LEGACY mapping")
+    void defaultVersionRoutesToLegacy() throws Exception {
+        // Not merely "a default resolves" — WHICH default. Production ingests
+        // into the legacy index only, so an unversioned caller must reach it.
+        // If this ever flips to the optimized service, every client that has not
+        // opted in starts getting empty results.
+        mockMvc.perform(withIdentity(get(URL)))
+                .andExpect(status().isOk());
+
+        verify(searchService).search(any(), any());
+        verify(optimizedSearchService, never()).search(any(), any());
     }
 
     @Test

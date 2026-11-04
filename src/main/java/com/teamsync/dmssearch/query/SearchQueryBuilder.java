@@ -10,6 +10,8 @@ import com.teamsync.dmssearch.config.ElasticsearchProperties;
 import com.teamsync.dmssearch.dto.request.RequestIdentity;
 import com.teamsync.dmssearch.dto.request.SearchCriteria;
 import com.teamsync.dmssearch.dto.request.SortKey;
+import com.teamsync.dmssearch.dto.response.DocumentSummary;
+import com.teamsync.dmssearch.dto.response.SearchHit;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -34,7 +36,17 @@ import java.util.Map;
  */
 @Component
 @RequiredArgsConstructor
-public class SearchQueryBuilder {
+public class SearchQueryBuilder implements QueryBuilder {
+
+    /**
+     * The API version this builder serves.
+     *
+     * <p>1.1, not 1.0: the optimized mapping it targets is not yet deployed to
+     * production. v1.0 is {@link com.teamsync.dmssearch.legacy.LegacyQueryBuilder},
+     * which queries the legacy index running there today. When production
+     * migrates, v1.0 and its builder are deleted and this becomes the only one.
+     */
+    public static final String API_VERSION = "1.1";
 
     /**
      * Fields kept out of every result.
@@ -55,6 +67,17 @@ public class SearchQueryBuilder {
     private static final String TIEBREAKER_FIELD = "documentId";
 
     private final ElasticsearchProperties props;
+    private final TenantFilter tenantFilter;
+
+    @Override
+    public Class<? extends SearchHit> documentType() {
+        return DocumentSummary.class;
+    }
+
+    @Override
+    public String apiVersion() {
+        return API_VERSION;
+    }
 
     /**
      * Builds the search request.
@@ -64,16 +87,18 @@ public class SearchQueryBuilder {
      * @param from     offset, or {@code null} when paging by cursor
      * @param searchAfter cursor sort values, or {@code null} for offset paging
      */
+    @Override
     public SearchRequest build(SearchCriteria criteria,
                                RequestIdentity identity,
                                Integer from,
                                List<FieldValue> searchAfter) {
 
-        BoolQuery.Builder bool = new BoolQuery.Builder();
-
         // ── SECURITY BOUNDARY — first, unconditional, not caller-controllable ──
-        bool.filter(termQuery("tenantId", identity.tenantId()));
-        bool.filter(termQuery("workspaceId", identity.workspaceId()));
+        // The builder arrives with the tenant and workspace filters already on
+        // it: TenantFilter owns its construction, so there is no way to begin
+        // assembling a query that lacks them. Shared with the legacy builder on
+        // purpose — isolation gets one implementation, not one per version.
+        BoolQuery.Builder bool = tenantFilter.scopedQuery(identity, "tenantId", "workspaceId");
 
         // ── visibility ──
         if (!criteria.isIncludeDeleted()) {
