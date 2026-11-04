@@ -33,8 +33,9 @@ shape**, and which capabilities exist:
 
 | | 1.0 | 1.1 |
 |---|---|---|
-| `attributes` / `attr` in the response | a **list** of `{key, value}` | a flat **object** |
-| field naming | `snake_case` | `camelCase` |
+| response DTO | document-service's `DocumentResponse` | `DocumentSummary` |
+| `attributes` / `attr` in the response | nested under `documentType.attributes`, a flat **object** | top-level `attr`, a flat **object** |
+| field naming | `camelCase`, `id` / `folderId` | `camelCase`, `documentId` / `folderId` |
 | `includeArchived` | ignored — no such field in the mapping | honoured |
 | filter by `documentTypeId` | **400** — not indexed | honoured |
 | subtree search | impossible — `path` holds a bare folder id | n/a |
@@ -59,7 +60,7 @@ API versioning; supported/default versions come from `api.versioning.*`.
 ## One endpoint, two jobs
 
 ```
-GET /api/search/documents
+GET /api/search/dms/documents
 ```
 
 | Job | Parameters | Query it builds |
@@ -177,22 +178,91 @@ Row 2 is a healthy broad search, not a failure. Only row 3 is a problem.
 
 ## Response shape
 
-A result is a **summary**, not the whole document. `content` (full OCR text),
-`path` and `bucket` are excluded at the Elasticsearch level — a 50-page PDF's
-text is ~200 KB, so returning it for 20 hits would make one page several
-megabytes of data nothing displays.
+A result is a **summary**, not the whole document. `content` (the full OCR text)
+is excluded at the Elasticsearch level — a 50-page PDF's text is ~200 KB, so
+returning it for 20 hits would make one page several megabytes of data nothing
+displays.
 
-`attr` and `folderAttr` **are** returned, so callers can confirm a hit matched
-the field they expected.
+Both versions return `ApiResponse<SearchPage>`: the hits in `items`, plus
+`page` / `size` / `total` / `totalIsExact` / `complete` / `hasNext` /
+`nextCursor` / `tookMs`.
 
-For the full document, call document-service with the `documentId`.
+### v1.0 — document-service's `DocumentResponse`
+
+v1.0 replaces document-service's `/api/documents/search/token`, `/search/pan` and
+`/search/acknowledgement`, all of which return `DocumentResponse`. Each hit is
+emitted in that exact shape, including the wire names `id` (not `documentId`) and
+`folderId` (not `parentId`), so moving to this service is a URL change for
+existing clients rather than a parser change.
+
+```json
+{
+  "id": "DOC-TEST-0001",
+  "documentName": "260812213869103-20260812_095825975.pdf",
+  "ownedBy": "700aed14-841a-4be2-a974-aa4c889f8b39",
+  "workspaceId": "6a842029e3ac57df8b8c58cf",
+  "folderId": "260812213869103",
+  "tenantId": "6a841cbde32f87eb8577a5cc",
+  "extension": "pdf",
+  "documentType": {
+    "documentTypeName": "PAN_CARD",
+    "attributes": { "pan_number": "ABCDE1234F", "customer_name": "Ramesh Kumar" }
+  },
+  "createdAt": "2026-08-20T10:17:55.113+05:30",
+  "updatedAt": "2026-08-21T11:00:00.000+05:30",
+  "storageKey": "260812213869103",
+  "bucketName": "teamsync-docs"
+}
+```
+
+The field list is a straight **intersection**: a `DocumentResponse` field appears
+only if the legacy index actually holds it. These do not, and are omitted —
+absent from the JSON, not `null`, exactly as document-service omits `tagIds` for
+an untagged document:
+
+| omitted | why |
+|---|---|
+| `displaySize` | no size field in the legacy mapping or `_source` |
+| `Content-MD5` | checksum is not indexed |
+| `tagIds` | tags are not indexed |
+| `isRootItem` | every legacy document has a `folder_id`, so it is a constant `false` |
+| `templateValidation` | the index has `validation_status` (`"VALIDATED"`), not document-service's `"1"`/`"0"`/`"-1"` code, and no `validatedAt` — same name, different value domain |
+| `score` | not part of the `DocumentResponse` contract; ordering still reflects relevance |
+
+Two values are translated rather than passed through, because the field name
+matching is worthless if the value does not:
+
+- **`extension`** — the index stores `".pdf"`, the contract returns `"pdf"`.
+- **`documentType.attributes`** — the index stores a `nested` array
+  `[{key,value},…]`, the contract returns a map `{key: value}`. Duplicate keys
+  collapse, last one wins; `Map<String, Object>` has no room for a second value
+  and neither does document-service's own contract.
+
+`folder_type_attributes` is **not** returned: `DocumentResponse` has no field for
+it. Filtering on `folderAttr.*` still works.
+
+`LegacyDocumentSummary` is the Elasticsearch deserialisation target and stays
+snake_case because it must match `_source`; `LegacyDocumentResponseMapper`
+converts it. The whole translation lives in the `legacy` package and is deleted
+with it.
+
+### v1.1 — `DocumentSummary`
+
+Its own camelCase shape, with `attr` and `folderAttr` returned at the top level
+so callers can confirm a hit matched the field they expected.
+
+For the full document, call document-service with the document id.
 
 ## Errors
 
-Platform envelope (`status`/`message`/`data`/`error`/`details`/`requestInfo`),
-matching document-service. Deliberately **not** RFC 9457 — one service emitting
-`application/problem+json` while five others emit this envelope would force
-clients to handle two error shapes.
+Platform envelope (`status`/`message`/`data`/`error`/`details`/`requestInfo`).
+
+**This differs from document-service**, which returns the envelope on success but
+a separate `ProblemDetail` object (RFC 7807: `type`/`title`/`status`/`detail`/
+`instance`/`errorCode`/`errorCategory`/`timestamp`/`traceId`/`correlationId`/
+`errorContext`) on failure. An earlier version of this file claimed parity on
+errors; that was wrong — only the success envelope matches. Aligning the error
+shape is a known, deliberate gap, not an oversight.
 
 | Code | HTTP | Meaning |
 |---|---|---|
@@ -269,11 +339,11 @@ curl http://localhost:7008/health
 ```bash
 # free text
 curl -H "X-Tenant-Id: t1" -H "X-Workspace-Id: w1" \
-  "http://localhost:7008/api/search/documents?q=quarterly%20report&size=10"
+  "http://localhost:7008/api/search/dms/documents?q=quarterly%20report&size=10"
 
 # exact attribute lookup
 curl -H "X-Tenant-Id: t1" -H "X-Workspace-Id: w1" \
-  "http://localhost:7008/api/search/documents?folderAttr.token_number=TOKEN-20260819054206"
+  "http://localhost:7008/api/search/dms/documents?folderAttr.token_number=TOKEN-20260819054206"
 ```
 
 ## Tests

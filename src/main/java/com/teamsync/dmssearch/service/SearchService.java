@@ -173,7 +173,10 @@ public class SearchService {
                                                     boolean byCursor) {
 
         List<Hit<T>> hits = response.hits().hits();
-        List<T> items = new ArrayList<>(hits.size());
+        // Object, not T: the builder decides what goes on the wire, and for v1.0
+        // that is NOT the DTO the hit deserialised into. See
+        // QueryBuilder#toApiShape.
+        List<Object> items = new ArrayList<>(hits.size());
 
         for (Hit<T> hit : hits) {
             T doc = hit.source();
@@ -182,10 +185,12 @@ public class SearchService {
             }
             // Only meaningful when something was actually scored; without free
             // text every document scores identically and the number is noise.
+            // Stamped BEFORE shaping, so a version whose wire DTO carries the
+            // score can copy it across.
             if (criteria.hasFreeText()) {
                 doc.setScore(hit.score());
             }
-            items.add(doc);
+            items.add(queryBuilder.toApiShape(doc));
         }
 
         // Elasticsearch's timeout is best-effort: it does not abort the search, it

@@ -46,7 +46,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 class SearchControllerTest {
 
-    private static final String URL = "/api/search/documents";
+    private static final String URL = "/api/search/dms/documents";
 
     private MockMvc mockMvc;
 
@@ -323,7 +323,7 @@ class SearchControllerTest {
     void pathIsUnversioned() {
         // Version travels in the header, matching document-service. If this ever
         // reads /api/v1/... the platform convention has drifted.
-        assertThat(URL).isEqualTo("/api/search/documents");
+        assertThat(URL).isEqualTo("/api/search/dms/documents");
         assertThat(URL).doesNotContain("/v1");
     }
 

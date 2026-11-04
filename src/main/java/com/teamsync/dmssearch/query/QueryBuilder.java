@@ -61,4 +61,23 @@ public interface QueryBuilder {
 
     /** The API version this builder serves — {@code "1.0"} or {@code "1.1"}. */
     String apiVersion();
+
+    /**
+     * Converts a deserialised hit into the object this version puts on the wire.
+     *
+     * <p>Defaults to the hit itself, which is what v1.1 wants: its
+     * {@code DocumentSummary} is already the client-facing shape. v1.0 overrides
+     * it, because its DTO has to match the Elasticsearch {@code _source} it is
+     * read from and that is NOT the shape its clients parse.
+     *
+     * <p>Declared here rather than branched on in {@code SearchService} so that
+     * the executor still knows nothing about either version. It stays a straight
+     * line: build, execute, shape, page.
+     *
+     * @param hit a hit already deserialised into {@link #documentType()}, with
+     *            its score stamped if the query was scored
+     */
+    default Object toApiShape(SearchHit hit) {
+        return hit;
+    }
 }

@@ -31,9 +31,11 @@ import java.util.Map;
  * archive flag are absent from both the mapping AND {@code _source}. They are
  * therefore omitted entirely rather than declared and always null.
  *
- * <p>{@code content} (full OCR text — kilobytes per document), {@code path} and
- * {@code bucket} are excluded at the Elasticsearch level by
- * {@code LegacyQueryBuilder.SOURCE_EXCLUDES}, so they are not declared here.
+ * <p>{@code content} (full OCR text — kilobytes per document) is excluded at
+ * the Elasticsearch level by {@code LegacyQueryBuilder.SOURCE_EXCLUDES}, so it is
+ * not declared here. {@code path} and {@code bucket} ARE fetched: they back
+ * {@code storageKey} and {@code bucketName} on {@link LegacyDocumentResponse},
+ * which document-service's contract includes.
  *
  * <p>Timestamps stay {@code String}: they are already ISO-8601 with offset in
  * Elasticsearch, and this service runs Jackson 2 (deserialising ES responses)
@@ -120,6 +122,14 @@ public class LegacyDocumentSummary implements SearchHit {
 
     @JsonProperty("validation_confidence")
     private Float validationConfidence;
+
+    /** Storage object key. Becomes {@code storageKey} on the response. */
+    @JsonProperty("path")
+    private String path;
+
+    /** Storage bucket. Becomes {@code bucketName} on the response. */
+    @JsonProperty("bucket")
+    private String bucket;
 
     /**
      * Relevance score. Null when the query had no free-text term, since

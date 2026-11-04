@@ -58,7 +58,7 @@ class LegacyQueryBuilderTest {
         props.setRequestTimeoutMs(5000);
         // Real TenantFilter, not a mock: it is what puts the scope clauses on
         // every query, and these tests exist to prove they are there.
-        builder = new LegacyQueryBuilder(props, new TenantFilter());
+        builder = new LegacyQueryBuilder(props, new TenantFilter(), new LegacyDocumentResponseMapper());
     }
 
     // ------------------------------------------------------------------
@@ -453,15 +453,19 @@ class LegacyQueryBuilderTest {
         }
 
         @Test
-        @DisplayName("content, path and bucket are excluded from _source")
+        @DisplayName("content is excluded from _source, and nothing else is")
         void heavyFieldsExcluded() {
             String body = json(builder.build(base().build(), IDENTITY, 0, null));
+            JsonNode excludes = tree(body).path("_source").path("excludes");
             // content holds the full OCR text — kilobytes per hit, and nothing
             // renders it in a result list.
-            assertThat(body).contains("content").contains("path").contains("bucket");
-            assertThat(tree(body).path("_source").path("excludes"))
-                    .as("Body: %s", body)
-                    .hasSize(3);
+            assertThat(excludes).as("Body: %s", body).hasSize(1);
+            assertThat(excludes.get(0).asText()).isEqualTo("content");
+            // path and bucket must NOT be excluded: they back storageKey and
+            // bucketName on the response, which document-service also returns.
+            // Excluding them again would make both fields silently vanish from
+            // every hit, with no error anywhere.
+            assertThat(excludes.toString()).doesNotContain("path").doesNotContain("bucket");
         }
 
         @Test

@@ -94,12 +94,17 @@ public class LegacyQueryBuilder implements QueryBuilder {
     /**
      * Fields kept out of every result.
      *
-     * <p>{@code content} is the point: in production it holds the full OCR text
-     * of a document, kilobytes per hit. Returning it for 20 hits would make one
-     * page of results megabytes of data nothing renders. {@code path} and
-     * {@code bucket} are storage details a result list has no use for.
+     * <p>Just {@code content}, and it is the whole point: in production it holds
+     * the full OCR text of a document, kilobytes per hit. Returning it for 20
+     * hits would make one page of results megabytes of data nothing renders.
+     *
+     * <p>{@code path} and {@code bucket} were excluded here too, and are no
+     * longer: they back {@code storageKey} and {@code bucketName}, which
+     * document-service's {@code DocumentResponse} returns. Two short keyword
+     * fields per hit is a cost worth paying for contract parity; the OCR text is
+     * not.
      */
-    public static final List<String> SOURCE_EXCLUDES = List.of("content", "path", "bucket");
+    public static final List<String> SOURCE_EXCLUDES = List.of("content");
 
     // ── legacy field names ────────────────────────────────────────────────
     private static final String F_TENANT           = "tenant_id";
@@ -145,10 +150,28 @@ public class LegacyQueryBuilder implements QueryBuilder {
 
     private final ElasticsearchProperties props;
     private final TenantFilter tenantFilter;
+    private final LegacyDocumentResponseMapper responseMapper;
 
     @Override
     public Class<? extends SearchHit> documentType() {
         return LegacyDocumentSummary.class;
+    }
+
+    /**
+     * Reshapes the raw index hit into document-service's
+     * {@code DocumentResponse} contract.
+     *
+     * <p>v1.0 replaces document-service's {@code /search/token},
+     * {@code /search/pan} and {@code /search/acknowledgement} endpoints, which
+     * all return that shape. Emitting it here makes the move to this service a
+     * URL change for existing clients instead of a parser change.
+     *
+     * <p>The cast is safe: {@code SearchService} only ever passes back a hit it
+     * deserialised into {@link #documentType()}, which is this builder's own DTO.
+     */
+    @Override
+    public Object toApiShape(SearchHit hit) {
+        return responseMapper.toResponse((LegacyDocumentSummary) hit);
     }
 
     @Override
