@@ -1,30 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <!-- Console Appender with TraceId and SpanId from MDC -->
-    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
-        <encoder>
-            <pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %highlight(%-5level) [%thread] [TraceId=%X{trace_id}] [SpanId=%X{span_id}] [correlationId=%X{correlation.id:-none}] %logger{36} - %msg%n</pattern>
-        </encoder>
-    </appender>
-
+<appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+<encoder>
+<pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %highlight(%-5level) [%thread] [TraceId=%X{trace_id}] [SpanId=%X{span_id}] [correlationId=%X{correlation.id:-none}] [tenantId=%X{tenant.id:-none}] [workspaceId=%X{workspace.id:-none}] %logger{36} - %msg%n</pattern>
+</encoder>
+</appender>
+ 
     <!-- Root Logger -->
-    <root level="INFO">
-        <appender-ref ref="CONSOLE" />
-    </root>
-
+<root level="INFO">
+<appender-ref ref="CONSOLE" />
+</root>
+ 
     <!-- Reduce noise from Spring Boot internals -->
-    <logger name="org.springframework" level="WARN"/>
-    <logger name="org.apache.catalina" level="WARN"/>
-    <logger name="org.apache.tomcat" level="WARN"/>
-    <logger name="org.apache.hc" level="WARN"/>
-
-    <!--
-        The Elasticsearch client logs full request bodies at DEBUG. Search terms
-        routinely contain PAN and passport numbers, so this must never be lowered
-        in a deployed environment.
-    -->
-    <logger name="co.elastic.clients" level="WARN"/>
-    <logger name="org.elasticsearch.client" level="WARN"/>
+<logger name="org.springframework" level="WARN"/>
+<logger name="org.apache.catalina" level="WARN"/>
+<logger name="org.apache.tomcat" level="WARN"/>
+<logger name="org.hibernate" level="WARN"/>
 
     <!-- Application logs -->
     <logger name="com.teamsync.dmssearch" level="INFO"/>

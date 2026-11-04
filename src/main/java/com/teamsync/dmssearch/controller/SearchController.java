@@ -66,7 +66,7 @@ import java.util.Map;
  * GET means it is cacheable, bookmarkable, and honest about HTTP semantics.
  */
 @RestController
-@RequestMapping("/api/search")
+@RequestMapping("/api/search/dms")
 public class SearchController {
 
     /** The legacy mapping — what production runs today. */
